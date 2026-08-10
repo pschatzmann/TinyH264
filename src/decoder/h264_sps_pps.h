@@ -3,12 +3,14 @@
 #include "h264_bitreader.h"
 #include "h264_config.h"
 
-// Header-only: SPS/PPS structs plus parse functions, per ITU-T H.264
-// clauses 7.3.2.1 (SPS) and 7.3.2.2 (PPS). Only the subset needed to decode
-// Baseline-profile (I/P slices, CAVLC) streams is fully supported; streams
-// that require features we don't decode (High-profile chroma/scaling
-// extensions, FMO slice groups, PPS scaling lists) are detected and flagged
-// via `unsupported` rather than mis-parsed or crashed on.
+/*
+ * Header-only: SPS/PPS structs plus parse functions, per ITU-T H.264
+ * clauses 7.3.2.1 (SPS) and 7.3.2.2 (PPS). Only the subset needed to decode
+ * Baseline-profile (I/P slices, CAVLC) streams is fully supported; streams
+ * that require features we don't decode (High-profile chroma/scaling
+ * extensions, FMO slice groups, PPS scaling lists) are detected and flagged
+ * via `unsupported` rather than mis-parsed or crashed on.
+ */
 
 #ifndef H264_MAX_POC_CYCLE
 #define H264_MAX_POC_CYCLE 8  // num_ref_frames_in_pic_order_cnt_cycle cap
@@ -16,9 +18,11 @@
 
 namespace tinyh264 {
 
-/// Parsed seq_parameter_set_rbsp() (clause 7.3.2.1). One SPS is cached per
-/// distinct seq_parameter_set_id seen in the stream (Decoder::spsTable_);
-/// a slice's PPS points back at the SPS it needs via Pps::spsId.
+/**
+ * Parsed seq_parameter_set_rbsp() (clause 7.3.2.1). One SPS is cached per
+ * distinct seq_parameter_set_id seen in the stream (Decoder::spsTable_);
+ * a slice's PPS points back at the SPS it needs via Pps::spsId.
+ */
 struct Sps {
   bool valid = false;
   bool unsupported = false;  // parsed, but describes a stream we can't decode
@@ -54,20 +58,26 @@ struct Sps {
   uint32_t codedWidth = 0, codedHeight = 0;      // MB-aligned
   uint32_t displayWidth = 0, displayHeight = 0;  // after cropping
 
-  /// Derives the picture-size fields (clause 7.4.2.1.1's PicWidthInMbs /
-  /// FrameHeightInMbs / cropping formulas) from the raw parsed
-  /// *Minus1 syntax elements. Called once at the end of parseSps() after
-  /// all the raw fields are in place.
+  /**
+   * Derives the picture-size fields (clause 7.4.2.1.1's PicWidthInMbs /
+   * FrameHeightInMbs / cropping formulas) from the raw parsed
+   * *Minus1 syntax elements. Called once at the end of parseSps() after
+   * all the raw fields are in place.
+   */
   void finalize() {
     picWidthInMbs = picWidthInMbsMinus1 + 1;
-    // frameMbsOnlyFlag must be true for anything we support (see parseSps);
-    // FrameHeightInMbs = (2 - frame_mbs_only_flag) * (map_units + 1).
+    /*
+     * frameMbsOnlyFlag must be true for anything we support (see parseSps);
+     * FrameHeightInMbs = (2 - frame_mbs_only_flag) * (map_units + 1).
+     */
     picHeightInMbs = picHeightInMapUnitsMinus1 + 1;
     codedWidth = picWidthInMbs * H264_MB_SIZE;
     codedHeight = picHeightInMbs * H264_MB_SIZE;
 
-    // 4:2:0 only (chroma_format_idc == 1, the only case we accept):
-    // CropUnitX = 2, CropUnitY = 2 * (2 - frame_mbs_only_flag) = 2.
+    /*
+     * 4:2:0 only (chroma_format_idc == 1, the only case we accept):
+     * CropUnitX = 2, CropUnitY = 2 * (2 - frame_mbs_only_flag) = 2.
+     */
     uint32_t cropUnitX = 2, cropUnitY = 2;
     displayWidth = codedWidth;
     displayHeight = codedHeight;
@@ -80,10 +90,12 @@ struct Sps {
   }
 };
 
-/// Parsed pic_parameter_set_rbsp() (clause 7.3.2.2). One PPS is cached per
-/// distinct pic_parameter_set_id seen in the stream (Decoder::ppsTable_);
-/// each slice header names the PPS (and, transitively via Pps::spsId, the
-/// SPS) it uses.
+/**
+ * Parsed pic_parameter_set_rbsp() (clause 7.3.2.2). One PPS is cached per
+ * distinct pic_parameter_set_id seen in the stream (Decoder::ppsTable_);
+ * each slice header names the PPS (and, transitively via Pps::spsId, the
+ * SPS) it uses.
+ */
 struct Pps {
   bool valid = false;
   bool unsupported = false;
@@ -107,10 +119,12 @@ struct Pps {
   int32_t secondChromaQpIndexOffset = 0;
 };
 
-/// profile_idc values whose SPS carries the High-profile chroma/bit-depth/
-/// scaling-list extension fields (spec 7.3.2.1.1, the `if (profile_idc ==
-/// ...)` list). None of these are Baseline, so we only need to parse far
-/// enough to recognize them and bail.
+/**
+ * profile_idc values whose SPS carries the High-profile chroma/bit-depth/
+ * scaling-list extension fields (spec 7.3.2.1.1, the `if (profile_idc ==
+ * ...)` list). None of these are Baseline, so we only need to parse far
+ * enough to recognize them and bail.
+ */
 inline bool spsHasChromaExtension(uint8_t profileIdc) {
   switch (profileIdc) {
     case 100: case 110: case 122: case 244: case 44:
@@ -122,13 +136,15 @@ inline bool spsHasChromaExtension(uint8_t profileIdc) {
   }
 }
 
-/// Parses seq_parameter_set_rbsp() (clause 7.3.2.1) from `br` into `sps`.
-/// Always returns true (the bool return exists only to mirror
-/// parseSliceHeader()'s/parsePps()'s signature) - callers must check
-/// `sps->unsupported` for either a raw bitstream error or a structurally
-/// valid SPS that describes a stream this decoder can't handle
-/// (interlaced content, non-4:2:0 chroma, High-profile scaling lists, an
-/// oversized POC reorder cycle), and `sps->valid` for outright success.
+/**
+ * Parses seq_parameter_set_rbsp() (clause 7.3.2.1) from `br` into `sps`.
+ * Always returns true (the bool return exists only to mirror
+ * parseSliceHeader()'s/parsePps()'s signature) - callers must check
+ * `sps->unsupported` for either a raw bitstream error or a structurally
+ * valid SPS that describes a stream this decoder can't handle
+ * (interlaced content, non-4:2:0 chroma, High-profile scaling lists, an
+ * oversized POC reorder cycle), and `sps->valid` for outright success.
+ */
 inline bool parseSps(BitReader& br, Sps* sps) {
   *sps = Sps();
 
@@ -145,8 +161,10 @@ inline bool parseSps(BitReader& br, Sps* sps) {
     br.u(1);  // qpprime_y_zero_transform_bypass_flag
     bool scalingMatrixPresent = br.flag();
     if (scalingMatrixPresent || chromaFormatIdc != 1) {
-      // High-profile scaling lists / non-4:2:0 chroma: not something a
-      // Baseline-only decoder needs to handle. Flag and stop.
+      /*
+       * High-profile scaling lists / non-4:2:0 chroma: not something a
+       * Baseline-only decoder needs to handle. Flag and stop.
+       */
       sps->unsupported = true;
       return true;
     }
@@ -178,9 +196,11 @@ inline bool parseSps(BitReader& br, Sps* sps) {
   sps->frameMbsOnlyFlag = br.flag();
   if (!sps->frameMbsOnlyFlag) {
     sps->mbAdaptiveFrameFieldFlag = br.flag();
-    // Interlaced (PAFF/MBAFF) content: out of scope for a Baseline-only
-    // decoder (Baseline requires frame_mbs_only_flag == 1 anyway, but be
-    // defensive against non-conformant/mislabeled streams).
+    /*
+     * Interlaced (PAFF/MBAFF) content: out of scope for a Baseline-only
+     * decoder (Baseline requires frame_mbs_only_flag == 1 anyway, but be
+     * defensive against non-conformant/mislabeled streams).
+     */
     sps->unsupported = true;
     return true;
   }
@@ -192,8 +212,10 @@ inline bool parseSps(BitReader& br, Sps* sps) {
     sps->cropTop = br.ue();
     sps->cropBottom = br.ue();
   }
-  // vui_parameters_present_flag / vui_parameters(): not needed for decode,
-  // and nothing meaningful follows it in the RBSP, so we stop reading here.
+  /*
+   * vui_parameters_present_flag / vui_parameters(): not needed for decode,
+   * and nothing meaningful follows it in the RBSP, so we stop reading here.
+   */
 
   if (br.error()) {
     sps->unsupported = true;
@@ -205,10 +227,12 @@ inline bool parseSps(BitReader& br, Sps* sps) {
   return true;
 }
 
-/// Parses pic_parameter_set_rbsp() (clause 7.3.2.2) from `br` into `pps`.
-/// Like parseSps(), always returns true - check `pps->unsupported`
-/// (FMO slice groups, CABAC, High-profile PPS scaling lists, or a raw
-/// bitstream error) and `pps->valid` for the actual outcome.
+/**
+ * Parses pic_parameter_set_rbsp() (clause 7.3.2.2) from `br` into `pps`.
+ * Like parseSps(), always returns true - check `pps->unsupported`
+ * (FMO slice groups, CABAC, High-profile PPS scaling lists, or a raw
+ * bitstream error) and `pps->valid` for the actual outcome.
+ */
 inline bool parsePps(BitReader& br, Pps* pps) {
   *pps = Pps();
 
@@ -218,11 +242,13 @@ inline bool parsePps(BitReader& br, Pps* pps) {
   pps->bottomFieldPicOrderInFramePresentFlag = br.flag();
   pps->numSliceGroupsMinus1 = br.ue();
   if (pps->numSliceGroupsMinus1 > 0) {
-    // Flexible Macroblock Ordering: technically legal in Baseline profile,
-    // but essentially never emitted by real camera/RTSP H.264 encoders.
-    // Implementing the slice-group map machinery adds real complexity for
-    // a feature this decoder's target sources don't use, so we flag it
-    // as unsupported rather than mis-decode it.
+    /*
+     * Flexible Macroblock Ordering: technically legal in Baseline profile,
+     * but essentially never emitted by real camera/RTSP H.264 encoders.
+     * Implementing the slice-group map machinery adds real complexity for
+     * a feature this decoder's target sources don't use, so we flag it
+     * as unsupported rather than mis-decode it.
+     */
     pps->unsupported = true;
     return true;
   }

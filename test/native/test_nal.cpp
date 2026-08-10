@@ -1,6 +1,8 @@
-// Desktop-only test: parse a real ffmpeg-encoded baseline/CAVLC QCIF stream
-// and check the NAL unit type sequence matches expectations (SPS, PPS, then
-// one IDR slice followed by 9 non-IDR (P) slices).
+/*
+ * Desktop-only test: parse a real ffmpeg-encoded baseline/CAVLC QCIF stream
+ * and check the NAL unit type sequence matches expectations (SPS, PPS, then
+ * one IDR slice followed by 9 non-IDR (P) slices).
+ */
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -48,9 +50,11 @@ int main() {
     printf("NAL #%d: type=%d refIdc=%d rbspSize=%zu\n", total, nal.type,
            nal.refIdc, nal.rbspSize);
     assert(nal.rbspSize > 0);
-    // Sanity: emulation prevention removal never produces the illegal
-    // 00 00 03 sequence's leftover, and shouldn't have shrunk below a
-    // trivial minimum for slice/SPS/PPS NALs.
+    /*
+     * Sanity: emulation prevention removal never produces the illegal
+     * 00 00 03 sequence's leftover, and shouldn't have shrunk below a
+     * trivial minimum for slice/SPS/PPS NALs.
+     */
   }
 
   printf("sps=%d pps=%d idr=%d p=%d sei=%d total=%d\n", spsCount, ppsCount,

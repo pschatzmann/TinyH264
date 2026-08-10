@@ -2,12 +2,14 @@
 #include <stdint.h>
 #include <Arduino.h>
 
-// A tiny (3-frame, QCIF, flat gray) baseline/CAVLC H.264 Annex-B
-// elementary stream, embedded for a self-contained demo (no SD card or
-// network needed). Generated with:
-//   ffmpeg -f lavfi -i "color=c=gray:size=176x144:rate=10:duration=0.3" \
-//     -c:v libx264 -profile:v baseline -coder 0 -pix_fmt yuv420p -g 10 -bf 0 \
-//     -refs 1 -x264-params cabac=0:ref=1 flat_test.264
+/*
+ * A tiny (3-frame, QCIF, flat gray) baseline/CAVLC H.264 Annex-B
+ * elementary stream, embedded for a self-contained demo (no SD card or
+ * network needed). Generated with:
+ *   ffmpeg -f lavfi -i "color=c=gray:size=176x144:rate=10:duration=0.3" \
+ *     -c:v libx264 -profile:v baseline -coder 0 -pix_fmt yuv420p -g 10 -bf 0 \
+ *     -refs 1 -x264-params cabac=0:ref=1 flat_test.264
+ */
 const uint32_t kTestClipSize = 771;
 const uint8_t kTestClip[] PROGMEM = {
     0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xC0, 0x0A, 0xDA, 0x0B, 0x13, 0xB0, 0x11, 0x00, 0x00, 0x03,

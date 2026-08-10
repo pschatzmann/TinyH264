@@ -2,16 +2,20 @@
 #include <stdint.h>
 #include "h264_tables.h"
 
-// Header-only. Inverse quantization + inverse transform, ITU-T H.264
-// clauses 8.5.9 (4x4 residual scaling), 8.5.10 (luma DC Hadamard + scaling),
-// 8.5.11 (chroma DC Hadamard + scaling), 8.5.12.2 (4x4 core inverse
-// transform). Only the flat (no scaling-list) case is implemented, which is
-// the only case a Baseline-profile stream can signal.
+/*
+ * Header-only. Inverse quantization + inverse transform, ITU-T H.264
+ * clauses 8.5.9 (4x4 residual scaling), 8.5.10 (luma DC Hadamard + scaling),
+ * 8.5.11 (chroma DC Hadamard + scaling), 8.5.12.2 (4x4 core inverse
+ * transform). Only the flat (no scaling-list) case is implemented, which is
+ * the only case a Baseline-profile stream can signal.
+ */
 
 namespace tinyh264 {
 
-/// Table 8-15 (chroma_qp_index_offset already applied and clamped to
-/// 0..51 by the caller): maps QPI -> QPC for 8-bit video.
+/**
+ * Table 8-15 (chroma_qp_index_offset already applied and clamped to
+ * 0..51 by the caller): maps QPI -> QPC for 8-bit video.
+ */
 static const uint8_t kChromaQpTable[52] = {
     0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 29, 30,
@@ -19,8 +23,10 @@ static const uint8_t kChromaQpTable[52] = {
     39, 39, 39, 39,
 };
 
-/// Derives QP_C from QP_Y (clause 8.5.8): clamps QP_Y + the PPS's
-/// chroma_qp_index_offset into 0..51, then looks up Table 8-15.
+/**
+ * Derives QP_C from QP_Y (clause 8.5.8): clamps QP_Y + the PPS's
+ * chroma_qp_index_offset into 0..51, then looks up Table 8-15.
+ */
 inline int chromaQp(int lumaQp, int chromaQpIndexOffset) {
   int qpi = lumaQp + chromaQpIndexOffset;
   if (qpi < 0) qpi = 0;
@@ -28,14 +34,16 @@ inline int chromaQp(int lumaQp, int chromaQpIndexOffset) {
   return kChromaQpTable[qpi];
 }
 
-/// Scales a 4x4 block of quantized transform coefficients back to the
-/// residual domain, in place (raster order, 16 entries), clause 8.5.9 -
-/// the "flat scaling list" (weightScale == 16 everywhere) case, the only
-/// one a Baseline-profile stream can signal. If `skipDC` is true,
-/// position 0 is left untouched (used for I_16x16 luma AC blocks and all
-/// chroma AC blocks, where the DC term instead comes from the separately
-/// Hadamard-transformed DC block via dequantLumaDC4x4()/
-/// dequantChromaDC2x2()).
+/**
+ * Scales a 4x4 block of quantized transform coefficients back to the
+ * residual domain, in place (raster order, 16 entries), clause 8.5.9 -
+ * the "flat scaling list" (weightScale == 16 everywhere) case, the only
+ * one a Baseline-profile stream can signal. If `skipDC` is true,
+ * position 0 is left untouched (used for I_16x16 luma AC blocks and all
+ * chroma AC blocks, where the DC term instead comes from the separately
+ * Hadamard-transformed DC block via dequantLumaDC4x4()/
+ * dequantChromaDC2x2()).
+ */
 inline void dequant4x4(int32_t* c, int qp, bool skipDC) {
   int m = qp % 6;
   int shift = qp / 6;
@@ -52,9 +60,11 @@ inline void dequant4x4(int32_t* c, int qp, bool skipDC) {
   }
 }
 
-/// 4x4 Walsh-Hadamard transform used for I_16x16 luma DC coefficients, in
-/// place (raster order), clause 8.5.10. No rounding: the DC-specific
-/// dequant step below (dequantLumaDC4x4()) handles scaling.
+/**
+ * 4x4 Walsh-Hadamard transform used for I_16x16 luma DC coefficients, in
+ * place (raster order), clause 8.5.10. No rounding: the DC-specific
+ * dequant step below (dequantLumaDC4x4()) handles scaling.
+ */
 inline void hadamard4x4(int32_t* block) {
   int32_t tmp[16];
   for (int i = 0; i < 4; i++) {
@@ -77,9 +87,11 @@ inline void hadamard4x4(int32_t* block) {
   }
 }
 
-/// Scales an already-Hadamard-transformed (via hadamard4x4()) 4x4 luma DC
-/// block in place, clause 8.5.10. Result feeds into the corresponding
-/// AC block's position 0 (see decodeLumaBlockAc() in h264_macroblock.h).
+/**
+ * Scales an already-Hadamard-transformed (via hadamard4x4()) 4x4 luma DC
+ * block in place, clause 8.5.10. Result feeds into the corresponding
+ * AC block's position 0 (see decodeLumaBlockAc() in h264_macroblock.h).
+ */
 inline void dequantLumaDC4x4(int32_t* f, int qp) {
   int m = qp % 6;
   int shift = qp / 6;
@@ -93,8 +105,10 @@ inline void dequantLumaDC4x4(int32_t* f, int qp) {
   }
 }
 
-/// 2x2 Walsh-Hadamard transform for chroma DC coefficients (4:2:0), in
-/// place, raster order {c00, c01, c10, c11}, clause 8.5.11.
+/**
+ * 2x2 Walsh-Hadamard transform for chroma DC coefficients (4:2:0), in
+ * place, raster order {c00, c01, c10, c11}, clause 8.5.11.
+ */
 inline void hadamard2x2(int32_t* f) {
   int32_t c00 = f[0], c01 = f[1], c10 = f[2], c11 = f[3];
   f[0] = c00 + c01 + c10 + c11;
@@ -103,8 +117,10 @@ inline void hadamard2x2(int32_t* f) {
   f[3] = c00 - c01 - c10 + c11;
 }
 
-/// Scales an already-Hadamard-transformed (via hadamard2x2()) 2x2 chroma
-/// DC block in place, clause 8.5.11, using the chroma QP (see chromaQp()).
+/**
+ * Scales an already-Hadamard-transformed (via hadamard2x2()) 2x2 chroma
+ * DC block in place, clause 8.5.11, using the chroma QP (see chromaQp()).
+ */
 inline void dequantChromaDC2x2(int32_t* f, int chromaQp) {
   int m = chromaQp % 6;
   int shift = chromaQp / 6;
@@ -114,9 +130,11 @@ inline void dequantChromaDC2x2(int32_t* f, int chromaQp) {
   }
 }
 
-/// 4x4 inverse core transform, in place (raster order), clause 8.5.12.2.
-/// Includes the final (+32) >> 6 rounding/normalization, so the output is
-/// directly the spatial-domain residual ready for addResidual4x4().
+/**
+ * 4x4 inverse core transform, in place (raster order), clause 8.5.12.2.
+ * Includes the final (+32) >> 6 rounding/normalization, so the output is
+ * directly the spatial-domain residual ready for addResidual4x4().
+ */
 inline void idct4x4(int32_t* block) {
   int32_t tmp[16];
   for (int i = 0; i < 4; i++) {
@@ -141,19 +159,23 @@ inline void idct4x4(int32_t* block) {
   }
 }
 
-/// Clip1_Y/Clip1_C (clause 8.5.12.1, and generally "Clip1" throughout the
-/// spec for 8-bit video): clamps a signed sample value into the valid
-/// [0,255] pixel range.
+/**
+ * Clip1_Y/Clip1_C (clause 8.5.12.1, and generally "Clip1" throughout the
+ * spec for 8-bit video): clamps a signed sample value into the valid
+ * [0,255] pixel range.
+ */
 inline uint8_t clip255(int32_t v) {
   if (v < 0) return 0;
   if (v > 255) return 255;
   return (uint8_t)v;
 }
 
-/// Adds a 4x4 residual block (raster order, as produced by idct4x4()) to
-/// an 8-bit prediction block already sitting at dst (stride `stride`),
-/// clipping to [0,255] - the "prediction + residual" reconstruction step
-/// common to clause 8.3 (intra) and 8.4 (inter) sample reconstruction.
+/**
+ * Adds a 4x4 residual block (raster order, as produced by idct4x4()) to
+ * an 8-bit prediction block already sitting at dst (stride `stride`),
+ * clipping to [0,255] - the "prediction + residual" reconstruction step
+ * common to clause 8.3 (intra) and 8.4 (inter) sample reconstruction.
+ */
 inline void addResidual4x4(uint8_t* dst, int stride, const int32_t* residual) {
   for (int y = 0; y < 4; y++) {
     for (int x = 0; x < 4; x++) {

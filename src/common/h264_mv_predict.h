@@ -3,34 +3,38 @@
 #include "h264_mb_info.h"
 #include "h264_motion.h"
 
-// Header-only. Motion vector *prediction* (clause 8.4.1.3: the neighbor
-// lookup and median/directional-shortcut logic that turns A/B/C neighbor
-// MVs into a predicted MV) - shared by the decoder (decoder/
-// h264_macroblock_inter.h, which adds mvd_l0 to get the real MV) and the
-// encoder (encoder/h264_macroblock_encode_inter.h, which subtracts the
-// predicted MV from a motion-estimated real MV to get mvd_l0 to encode).
-// Templated on the context type (structural, not tied to
-// decoder::MbDecodeContext) the same way lumaNeighborNnz()/
-// predictIntra4x4Mode() (h264_mb_info.h) are - both decoder::
-// MbDecodeContext and encoder::MbEncodeContext expose the same
-// mbInfo/mbX/mbY/sliceId members this needs. Motion *compensation*
-// (turning a final MV into predicted pixels) is NOT here - that needs a
-// reference-picture list, which decoder::MbDecodeContext and encoder::
-// MbEncodeContext represent differently (the decoder's ctx.refList vs.
-// the encoder's own single-reference-frame storage, see
-// encoder/h264_encoder.h) - each side wraps h264_motion.h's
-// motionCompLuma()/motionCompChroma() (already context-independent) with
-// its own thin adapter instead.
+/*
+ * Header-only. Motion vector *prediction* (clause 8.4.1.3: the neighbor
+ * lookup and median/directional-shortcut logic that turns A/B/C neighbor
+ * MVs into a predicted MV) - shared by the decoder (decoder/
+ * h264_macroblock_inter.h, which adds mvd_l0 to get the real MV) and the
+ * encoder (encoder/h264_macroblock_encode_inter.h, which subtracts the
+ * predicted MV from a motion-estimated real MV to get mvd_l0 to encode).
+ * Templated on the context type (structural, not tied to
+ * decoder::MbDecodeContext) the same way lumaNeighborNnz()/
+ * predictIntra4x4Mode() (h264_mb_info.h) are - both decoder::
+ * MbDecodeContext and encoder::MbEncodeContext expose the same
+ * mbInfo/mbX/mbY/sliceId members this needs. Motion *compensation*
+ * (turning a final MV into predicted pixels) is NOT here - that needs a
+ * reference-picture list, which decoder::MbDecodeContext and encoder::
+ * MbEncodeContext represent differently (the decoder's ctx.refList vs.
+ * the encoder's own single-reference-frame storage, see
+ * encoder/h264_encoder.h) - each side wraps h264_motion.h's
+ * motionCompLuma()/motionCompChroma() (already context-independent) with
+ * its own thin adapter instead.
+ */
 
 namespace tinyh264 {
 
-/// A neighbor 4x4-grid lookup result for MV prediction: available means the
-/// neighbor exists (in-picture, same slice); interCoded additionally means
-/// it carries a real (non-intra) MV - intra neighbors are "available" with
-/// mv=(0,0) but never satisfy a refIdx-match shortcut. `refIdx` is -1 for
-/// Intra/unavailable neighbors (clause 8.4.1.3.2's refIdxLXN == -1), never
-/// equal to any real partition's refIdx (always >= 0). Produced by
-/// mvNeighborAt()/mvNeighborC(), consumed by predictMvGeneral().
+/**
+ * A neighbor 4x4-grid lookup result for MV prediction: available means the
+ * neighbor exists (in-picture, same slice); interCoded additionally means
+ * it carries a real (non-intra) MV - intra neighbors are "available" with
+ * mv=(0,0) but never satisfy a refIdx-match shortcut. `refIdx` is -1 for
+ * Intra/unavailable neighbors (clause 8.4.1.3.2's refIdxLXN == -1), never
+ * equal to any real partition's refIdx (always >= 0). Produced by
+ * mvNeighborAt()/mvNeighborC(), consumed by predictMvGeneral().
+ */
 struct MvNeighbor {
   bool available = false;
   bool interCoded = false;
@@ -38,23 +42,27 @@ struct MvNeighbor {
   int16_t mv[2] = {0, 0};
 };
 
-/// Looks up the 4x4-grid neighbor at (bx, by) relative to the current
-/// macroblock's top-left, following the same local/cross-MB derivation as
-/// lumaNeighborNnz/predictIntra4x4Mode (h264_mb_info.h): local positions
-/// use the current MB's own (partially filled-in) mv[] array, positions
-/// crossing bx<0/by<0 use the appropriate already-decoded neighbor MB.
-/// Positions with bx>=4 (crossing right) or by>=4 (crossing down) are
-/// never available (those macroblocks/partitions haven't been
-/// decoded/encoded yet in raster order) - the sole exception is bx==4
-/// with by<0 (the top-right neighbor MB), which legitimately can be
-/// available.
+/**
+ * Looks up the 4x4-grid neighbor at (bx, by) relative to the current
+ * macroblock's top-left, following the same local/cross-MB derivation as
+ * lumaNeighborNnz/predictIntra4x4Mode (h264_mb_info.h): local positions
+ * use the current MB's own (partially filled-in) mv[] array, positions
+ * crossing bx<0/by<0 use the appropriate already-decoded neighbor MB.
+ * Positions with bx>=4 (crossing right) or by>=4 (crossing down) are
+ * never available (those macroblocks/partitions haven't been
+ * decoded/encoded yet in raster order) - the sole exception is bx==4
+ * with by<0 (the top-right neighbor MB), which legitimately can be
+ * available.
+ */
 template <typename CtxT>
 inline MvNeighbor mvNeighborAt(const CtxT& ctx, int bx, int by) {
   MvNeighbor n;
-  // "Below" is never decoded yet regardless of column. "Right" (bx>=4) is
-  // only ever unavailable when it's the same row or below (the plain right
-  // MB, never decoded yet); bx==4 combined with by<0 is the top-right MB,
-  // which legitimately can be available.
+  /*
+   * "Below" is never decoded yet regardless of column. "Right" (bx>=4) is
+   * only ever unavailable when it's the same row or below (the plain right
+   * MB, never decoded yet); bx==4 combined with by<0 is the top-right MB,
+   * which legitimately can be available.
+   */
   if (by >= 4) return n;
   if (bx >= 4 && by >= 0) return n;
   if (bx >= 0 && by >= 0) {
@@ -88,15 +96,17 @@ inline MvNeighbor mvNeighborAt(const CtxT& ctx, int bx, int by) {
   return n;
 }
 
-/// Neighbor "C" for MV prediction (clause 8.4.1.3.2): the partition
-/// immediately above-right of (bx,by) sized pw x ph (4x4 units), i.e. at
-/// grid position (bx+pw, by-1), falling back to "D" (above-left, bx-1,
-/// by-1) when C is unavailable. Mirrors the intra4x4 top-right exception
-/// (h264_intra_pred.h) generalized to arbitrary partition widths: unlike
-/// the strictly-4x4 intra case, a partition can be wider than one 4x4
-/// block, so the "always unavailable" set isn't a fixed table - this just
-/// applies the same local-vs-cross-MB reasoning directly to the query
-/// position via mvNeighborAt().
+/**
+ * Neighbor "C" for MV prediction (clause 8.4.1.3.2): the partition
+ * immediately above-right of (bx,by) sized pw x ph (4x4 units), i.e. at
+ * grid position (bx+pw, by-1), falling back to "D" (above-left, bx-1,
+ * by-1) when C is unavailable. Mirrors the intra4x4 top-right exception
+ * (h264_intra_pred.h) generalized to arbitrary partition widths: unlike
+ * the strictly-4x4 intra case, a partition can be wider than one 4x4
+ * block, so the "always unavailable" set isn't a fixed table - this just
+ * applies the same local-vs-cross-MB reasoning directly to the query
+ * position via mvNeighborAt().
+ */
 template <typename CtxT>
 inline MvNeighbor mvNeighborC(const CtxT& ctx, int bx, int by, int pw,
                                int ph) {
@@ -105,12 +115,14 @@ inline MvNeighbor mvNeighborC(const CtxT& ctx, int bx, int by, int pw,
   return mvNeighborAt(ctx, bx - 1, by - 1);  // D fallback (top-left)
 }
 
-/// Standard median MV predictor (clause 8.4.1.3) for a partition at 4x4-grid
-/// position (bx,by) sized pw x ph (in 4x4 units) using reference index
-/// `curRefIdx`, writing the predicted MV into `outMv`. `directionalSide` is
-/// -1 for no shortcut, 0 to try the "use A directly if refIdx matches"
-/// shortcut (8x16 left, 16x8 bottom), 1 for "use B directly" (16x8 top), 2
-/// for "use C directly" (8x16 right).
+/**
+ * Standard median MV predictor (clause 8.4.1.3) for a partition at 4x4-grid
+ * position (bx,by) sized pw x ph (in 4x4 units) using reference index
+ * `curRefIdx`, writing the predicted MV into `outMv`. `directionalSide` is
+ * -1 for no shortcut, 0 to try the "use A directly if refIdx matches"
+ * shortcut (8x16 left, 16x8 bottom), 1 for "use B directly" (16x8 top), 2
+ * for "use C directly" (8x16 right).
+ */
 template <typename CtxT>
 inline void predictMvGeneral(const CtxT& ctx, int bx, int by, int pw, int ph,
                               int curRefIdx, int directionalSide,
@@ -120,16 +132,18 @@ inline void predictMvGeneral(const CtxT& ctx, int bx, int by, int pw, int ph,
   MvNeighbor c = mvNeighborC(ctx, bx, by, pw, ph);
 
   if (directionalSide >= 0) {
-    // P_L0_L0_16x8 / P_L0_L0_8x16 additionally get a one-sided pre-check
-    // (clause 8.4.1.3, Table 8-9): if the *one* relevant side has a
-    // matching ref_idx, use it directly. This is tried *before*, not
-    // instead of, the general process below - if it doesn't apply, the
-    // general "exactly one of A/B/C matches" rule can still apply. (Easy
-    // to get wrong: a "one-sided check replaces the whole rest of the
-    // process" reading looks plausible and mostly works, but fails
-    // whenever the directional side doesn't match yet exactly one of the
-    // *other* two neighbors does - caught via pixel-diffing full-frame P-
-    // slice decodes against ffmpeg's reference, not by inspection.)
+    /*
+     * P_L0_L0_16x8 / P_L0_L0_8x16 additionally get a one-sided pre-check
+     * (clause 8.4.1.3, Table 8-9): if the *one* relevant side has a
+     * matching ref_idx, use it directly. This is tried *before*, not
+     * instead of, the general process below - if it doesn't apply, the
+     * general "exactly one of A/B/C matches" rule can still apply. (Easy
+     * to get wrong: a "one-sided check replaces the whole rest of the
+     * process" reading looks plausible and mostly works, but fails
+     * whenever the directional side doesn't match yet exactly one of the
+     * *other* two neighbors does - caught via pixel-diffing full-frame P-
+     * slice decodes against ffmpeg's reference, not by inspection.)
+     */
     const MvNeighbor& side = directionalSide == 0 ? a
                               : directionalSide == 1 ? b
                                                       : c;
@@ -140,12 +154,14 @@ inline void predictMvGeneral(const CtxT& ctx, int bx, int by, int pw, int ph,
     }
   }
   {
-    // General process (clause 8.4.1.3.1): "matching ref_idx" means
-    // interCoded *and* refIdx == curRefIdx - unavailable/Intra neighbors
-    // have refIdx == -1 (clause 8.4.1.3.2), which can never equal a real
-    // partition's refIdx (always >= 0), so they never match without a
-    // separate availability check. If exactly one of A/B/C matches, the
-    // predictor is that one neighbor's MV directly.
+    /*
+     * General process (clause 8.4.1.3.1): "matching ref_idx" means
+     * interCoded *and* refIdx == curRefIdx - unavailable/Intra neighbors
+     * have refIdx == -1 (clause 8.4.1.3.2), which can never equal a real
+     * partition's refIdx (always >= 0), so they never match without a
+     * separate availability check. If exactly one of A/B/C matches, the
+     * predictor is that one neighbor's MV directly.
+     */
     bool ma = a.interCoded && a.refIdx == curRefIdx;
     bool mb_ = b.interCoded && b.refIdx == curRefIdx;
     bool mc = c.interCoded && c.refIdx == curRefIdx;
@@ -156,23 +172,25 @@ inline void predictMvGeneral(const CtxT& ctx, int bx, int by, int pw, int ph,
       outMv[1] = only.mv[1];
       return;
     }
-    // Zero-matches special case (still clause 8.4.1.3.1, cross-checked
-    // against FFmpeg's pred_motion() - NOT reducible to "exactly one
-    // match" as this project's earlier draft comment here incorrectly
-    // claimed): when B and C are both *truly* unavailable (picture/slice
-    // edge - not merely "available but Intra or non-matching ref_idx",
-    // which still count as available here) and A is available in any
-    // form, the predictor is A's MV directly, regardless of whether A's
-    // own ref_idx matches curRefIdx or A is even Inter-coded at all (an
-    // Intra A falls through to mv (0,0) via its default MvNeighbor
-    // fields, matching what the ordinary median would give anyway - the
-    // observable difference only shows up when A is Inter-coded with a
-    // non-matching ref_idx, where this bypasses the median entirely and
-    // uses A's real MV. Missing this case was a real bug, caught by
-    // pixel-diffing a real multi-reference-frame P-slice stream against
-    // ffmpeg's decode - a single-reference-frame stream can never
-    // exercise "A available with a different ref_idx", so this bug was
-    // invisible until multi-reference support was added.)
+    /*
+     * Zero-matches special case (still clause 8.4.1.3.1, cross-checked
+     * against FFmpeg's pred_motion() - NOT reducible to "exactly one
+     * match" as this project's earlier draft comment here incorrectly
+     * claimed): when B and C are both *truly* unavailable (picture/slice
+     * edge - not merely "available but Intra or non-matching ref_idx",
+     * which still count as available here) and A is available in any
+     * form, the predictor is A's MV directly, regardless of whether A's
+     * own ref_idx matches curRefIdx or A is even Inter-coded at all (an
+     * Intra A falls through to mv (0,0) via its default MvNeighbor
+     * fields, matching what the ordinary median would give anyway - the
+     * observable difference only shows up when A is Inter-coded with a
+     * non-matching ref_idx, where this bypasses the median entirely and
+     * uses A's real MV. Missing this case was a real bug, caught by
+     * pixel-diffing a real multi-reference-frame P-slice stream against
+     * ffmpeg's decode - a single-reference-frame stream can never
+     * exercise "A available with a different ref_idx", so this bug was
+     * invisible until multi-reference support was added.)
+     */
     if (matches == 0 && !b.available && !c.available && a.available) {
       outMv[0] = a.mv[0];
       outMv[1] = a.mv[1];
@@ -193,11 +211,13 @@ inline void predictMvGeneral(const CtxT& ctx, int bx, int by, int pw, int ph,
   predictMv(in, outMv);
 }
 
-/// Fills mb.mv[]/mb.refIdx[] for the 4x4 cells covered by a partition at
-/// (bx,by) sized pw x ph (4x4 units), so later neighbor lookups (this MB's
-/// own remaining partitions, and subsequent macroblocks) see a uniform
-/// per-4x4-block MV/refIdx regardless of the actual partition shape (16x16
-/// down to 4x4).
+/**
+ * Fills mb.mv[]/mb.refIdx[] for the 4x4 cells covered by a partition at
+ * (bx,by) sized pw x ph (4x4 units), so later neighbor lookups (this MB's
+ * own remaining partitions, and subsequent macroblocks) see a uniform
+ * per-4x4-block MV/refIdx regardless of the actual partition shape (16x16
+ * down to 4x4).
+ */
 inline void fillPartitionMv(MacroblockInfo& mb, int bx, int by, int pw,
                              int ph, int16_t mvX, int16_t mvY,
                              int8_t refIdx) {

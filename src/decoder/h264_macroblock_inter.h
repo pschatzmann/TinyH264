@@ -6,28 +6,32 @@
 #include "../common/h264_mv_predict.h"
 #include "../common/h264_tables.h"
 
-// Header-only. P-slice (Inter) macroblock_layer() decode: mb_type/
-// sub_mb_type parsing, ref_idx_l0 parsing, motion vector prediction
-// (clause 8.4.1.3) and reconstruction, motion compensation, and residual
-// decode (reusing the same CAVLC/dequant/IDCT machinery as intra blocks -
-// Inter differs only in prediction, not residual coding). P_Skip is
-// handled separately since it has no macroblock_layer() syntax at all.
-//
-// Up to H264_MAX_REF_FRAMES reference pictures are supported (see
-// h264_config.h and Decoder::setMaxRefFrames()). Intra neighbors, and
-// truly-unavailable neighbors, are assigned refIdx -1 for MV-prediction
-// purposes (clause 8.4.1.3.2) - never equal to a real partition's refIdx
-// (always >= 0), so "does the neighbor's ref_idx match" comparisons work
-// out correctly without a separate availability check.
+/*
+ * Header-only. P-slice (Inter) macroblock_layer() decode: mb_type/
+ * sub_mb_type parsing, ref_idx_l0 parsing, motion vector prediction
+ * (clause 8.4.1.3) and reconstruction, motion compensation, and residual
+ * decode (reusing the same CAVLC/dequant/IDCT machinery as intra blocks -
+ * Inter differs only in prediction, not residual coding). P_Skip is
+ * handled separately since it has no macroblock_layer() syntax at all.
+ *
+ * Up to H264_MAX_REF_FRAMES reference pictures are supported (see
+ * h264_config.h and Decoder::setMaxRefFrames()). Intra neighbors, and
+ * truly-unavailable neighbors, are assigned refIdx -1 for MV-prediction
+ * purposes (clause 8.4.1.3.2) - never equal to a real partition's refIdx
+ * (always >= 0), so "does the neighbor's ref_idx match" comparisons work
+ * out correctly without a separate availability check.
+ */
 
 namespace tinyh264 {
 
-/// Motion-compensates a partition (in pixel units derived from its 4x4-grid
-/// position/size) from reference picture `refIdx` (an index into
-/// ctx.refList, clause 8.2.4's RefPicList0) into the current frame, luma
-/// and both chroma planes (clause 8.4.2), writing the prediction directly
-/// - the caller adds the residual on top afterward (see
-/// decodeMacroblockInter()'s residual section).
+/**
+ * Motion-compensates a partition (in pixel units derived from its 4x4-grid
+ * position/size) from reference picture `refIdx` (an index into
+ * ctx.refList, clause 8.2.4's RefPicList0) into the current frame, luma
+ * and both chroma planes (clause 8.4.2), writing the prediction directly
+ * - the caller adds the residual on top afterward (see
+ * decodeMacroblockInter()'s residual section).
+ */
 template <typename Allocator>
 inline void motionCompensatePartition(MbDecodeContext<Allocator>& ctx, int bx, int by,
                                        int pw, int ph, int16_t mvX,
@@ -50,14 +54,16 @@ inline void motionCompensatePartition(MbDecodeContext<Allocator>& ctx, int bx, i
                     cpy, cw, ch, mvX, mvY);
 }
 
-/// Decodes a P_Skip macroblock (clause 8.4.1.1) - no macroblock_layer()
-/// syntax is present in the bitstream at all for a skipped MB (the caller,
-/// Decoder::decodeSlice(), determines skip runs from mb_skip_run and calls
-/// this once per skipped macroblock). Always references refIdx 0 (clause
-/// 8.4.1.1). Derives a single 16x16 motion vector (special-cased zero-MV
-/// rule, not the general median predictor, when either neighbor is
-/// unavailable or uses refIdx 0 with a zero MV) and performs full-MB
-/// motion compensation with no residual.
+/**
+ * Decodes a P_Skip macroblock (clause 8.4.1.1) - no macroblock_layer()
+ * syntax is present in the bitstream at all for a skipped MB (the caller,
+ * Decoder::decodeSlice(), determines skip runs from mb_skip_run and calls
+ * this once per skipped macroblock). Always references refIdx 0 (clause
+ * 8.4.1.1). Derives a single 16x16 motion vector (special-cased zero-MV
+ * rule, not the general median predictor, when either neighbor is
+ * unavailable or uses refIdx 0 with a zero MV) and performs full-MB
+ * motion compensation with no residual.
+ */
 template <typename Allocator>
 inline void decodePSkipMacroblock(MbDecodeContext<Allocator>& ctx, int qpY) {
   MacroblockInfo& mb = ctx.mbInfo->at(ctx.mbX, ctx.mbY);
@@ -68,9 +74,11 @@ inline void decodePSkipMacroblock(MbDecodeContext<Allocator>& ctx, int qpY) {
   MvNeighbor a = mvNeighborAt(ctx, -1, 0);
   MvNeighbor b = mvNeighborAt(ctx, 0, -1);
 
-  // Per spec, the explicit zero-mv rule is specifically refIdxN==0 &&
-  // mvN==(0,0) for an *available*, inter-coded neighbor; an unavailable
-  // neighbor (either side) also forces zero mv.
+  /*
+   * Per spec, the explicit zero-mv rule is specifically refIdxN==0 &&
+   * mvN==(0,0) for an *available*, inter-coded neighbor; an unavailable
+   * neighbor (either side) also forces zero mv.
+   */
   int16_t mv[2] = {0, 0};
   bool zeroMv =
       (!a.available || !b.available)
@@ -87,8 +95,10 @@ inline void decodePSkipMacroblock(MbDecodeContext<Allocator>& ctx, int qpY) {
   motionCompensatePartition(ctx, 0, 0, 4, 4, mv[0], mv[1], 0);
 }
 
-/// Decodes mvd_l0[][][0..1] (clause 7.3.5.1: two se(v) values, x then y)
-/// for one motion vector partition.
+/**
+ * Decodes mvd_l0[][][0..1] (clause 7.3.5.1: two se(v) values, x then y)
+ * for one motion vector partition.
+ */
 inline bool decodeMvd(BitReader& br, int16_t* mvd) {
   int32_t x = br.se();
   int32_t y = br.se();
@@ -98,18 +108,20 @@ inline bool decodeMvd(BitReader& br, int16_t* mvd) {
   return true;
 }
 
-/// Decodes one ref_idx_l0[] value, coded as te(v) (truncated Exp-Golomb,
-/// clause 9.1.1) with cMax = numActiveRefs - 1. Cross-checked against
-/// FFmpeg's h264_cavlc.c rather than re-derived from the spec's te(v)
-/// definition alone: when numActiveRefs <= 1 there is only one legal value
-/// and *no bits are read at all* (matches the syntax table's `if
-/// (num_ref_idx_l0_active_minus1 > 0 ...)` guard around ref_idx_l0 - so
-/// this function can be called unconditionally, whether or not the guard
-/// would have been true, and naturally reproduces "not present" as "read
-/// nothing, value 0"); when numActiveRefs == 2 it's a single inverted bit
-/// (te(v)'s cMax==1 special case: value = !u(1), NOT plain u(1)); only for
-/// numActiveRefs > 2 does it become a plain bounds-checked ue(v). Returns
-/// false on a bitstream error or an out-of-range decoded value.
+/**
+ * Decodes one ref_idx_l0[] value, coded as te(v) (truncated Exp-Golomb,
+ * clause 9.1.1) with cMax = numActiveRefs - 1. Cross-checked against
+ * FFmpeg's h264_cavlc.c rather than re-derived from the spec's te(v)
+ * definition alone: when numActiveRefs <= 1 there is only one legal value
+ * and *no bits are read at all* (matches the syntax table's `if
+ * (num_ref_idx_l0_active_minus1 > 0 ...)` guard around ref_idx_l0 - so
+ * this function can be called unconditionally, whether or not the guard
+ * would have been true, and naturally reproduces "not present" as "read
+ * nothing, value 0"); when numActiveRefs == 2 it's a single inverted bit
+ * (te(v)'s cMax==1 special case: value = !u(1), NOT plain u(1)); only for
+ * numActiveRefs > 2 does it become a plain bounds-checked ue(v). Returns
+ * false on a bitstream error or an out-of-range decoded value.
+ */
 inline bool decodeRefIdx(BitReader& br, int numActiveRefs, int8_t* outRefIdx) {
   if (numActiveRefs <= 1) {
     *outRefIdx = 0;
@@ -125,16 +137,18 @@ inline bool decodeRefIdx(BitReader& br, int numActiveRefs, int8_t* outRefIdx) {
   return true;
 }
 
-/// Decodes one Inter (P) macroblock's full macroblock_layer() (clause
-/// 7.3.5): mb_type/sub_mb_type + partition layout, per-partition MV
-/// prediction and reconstruction with immediate motion compensation, then
-/// coded_block_pattern/mb_qp_delta and the luma/chroma residual (reusing
-/// the same CAVLC/dequant/IDCT helpers as the Intra path in
-/// h264_macroblock.h - Inter differs from Intra only in how the
-/// prediction samples are produced, not in residual coding). Falls
-/// through to decodeMacroblockIntraWithType() for the "Intra macroblock
-/// inside a P slice" case (mb_type >= 5). `*qpY` is the running QP,
-/// updated in place; `result` reports unsupported-feature/error status.
+/**
+ * Decodes one Inter (P) macroblock's full macroblock_layer() (clause
+ * 7.3.5): mb_type/sub_mb_type + partition layout, per-partition MV
+ * prediction and reconstruction with immediate motion compensation, then
+ * coded_block_pattern/mb_qp_delta and the luma/chroma residual (reusing
+ * the same CAVLC/dequant/IDCT helpers as the Intra path in
+ * h264_macroblock.h - Inter differs from Intra only in how the
+ * prediction samples are produced, not in residual coding). Falls
+ * through to decodeMacroblockIntraWithType() for the "Intra macroblock
+ * inside a P slice" case (mb_type >= 5). `*qpY` is the running QP,
+ * updated in place; `result` reports unsupported-feature/error status.
+ */
 template <typename Allocator>
 inline bool decodeMacroblockInter(BitReader& br, MbDecodeContext<Allocator>& ctx,
                                    int* qpY, MacroblockDecodeResult* result) {
@@ -145,19 +159,23 @@ inline bool decodeMacroblockInter(BitReader& br, MbDecodeContext<Allocator>& ctx
 
   uint32_t mbTypeRaw = br.ue();
   if (mbTypeRaw >= 5) {
-    // Intra macroblock inside a P slice: same numbering as I-slice
-    // mb_type, offset by 5 (clause 7.4.5, Table 7-13/7-14).
+    /*
+     * Intra macroblock inside a P slice: same numbering as I-slice
+     * mb_type, offset by 5 (clause 7.4.5, Table 7-13/7-14).
+     */
     return decodeMacroblockIntraWithType(br, ctx, mbTypeRaw - 5, qpY, result);
   }
 
-  // --- Partition layout + ref_idx_l0 + MV prediction/reconstruction ------
-  // Syntax order (clause 7.3.5.1 mb_pred() / 7.3.5.2 sub_mb_pred(), cross-
-  // checked against FFmpeg's h264_cavlc.c): ALL ref_idx_l0 values for a
-  // macroblock are read first (one per top-level partition, or one per
-  // 8x8 quadrant for P_8x8/P_8x8ref0 - shared by every sub-partition
-  // within that quadrant, even if sub_mb_type further splits it), THEN
-  // all mvd_l0 values are read afterward - the two are NOT interleaved
-  // per-partition.
+  /*
+   * --- Partition layout + ref_idx_l0 + MV prediction/reconstruction ------
+   * Syntax order (clause 7.3.5.1 mb_pred() / 7.3.5.2 sub_mb_pred(), cross-
+   * checked against FFmpeg's h264_cavlc.c): ALL ref_idx_l0 values for a
+   * macroblock are read first (one per top-level partition, or one per
+   * 8x8 quadrant for P_8x8/P_8x8ref0 - shared by every sub-partition
+   * within that quadrant, even if sub_mb_type further splits it), THEN
+   * all mvd_l0 values are read afterward - the two are NOT interleaved
+   * per-partition.
+   */
   struct Part {
     int bx, by, pw, ph, dirSide;
     int8_t refIdx;
@@ -182,10 +200,12 @@ inline bool decodeMacroblockInter(BitReader& br, MbDecodeContext<Allocator>& ctx
     parts[numParts++] = {0, 0, 2, 4, 0, r0};
     parts[numParts++] = {2, 0, 2, 4, 2, r1};
   } else {
-    // P_8x8 / P_8x8ref0: four 8x8 (2x2 in 4x4 units) quadrants, each with
-    // its own sub_mb_type. P_8x8ref0 never codes ref_idx_l0 (always 0,
-    // regardless of numActiveRefs) - clause 7.3.5.2's
-    // `mb_type != P_8x8ref0` guard.
+    /*
+     * P_8x8 / P_8x8ref0: four 8x8 (2x2 in 4x4 units) quadrants, each with
+     * its own sub_mb_type. P_8x8ref0 never codes ref_idx_l0 (always 0,
+     * regardless of numActiveRefs) - clause 7.3.5.2's
+     * `mb_type != P_8x8ref0` guard.
+     */
     uint32_t subType[4];
     for (int i = 0; i < 4; i++) subType[i] = br.ue();
     if (br.error()) return false;
@@ -249,9 +269,11 @@ inline bool decodeMacroblockInter(BitReader& br, MbDecodeContext<Allocator>& ctx
                                parts[i].ph, mv[0], mv[1], parts[i].refIdx);
   }
 
-  // --- CBP / QP / residual (mirrors the Intra path in h264_macroblock.h,
-  //     minus the I_16x16-specific DC-block handling which doesn't apply
-  //     to Inter macroblocks) -------------------------------------------
+  /*
+   * --- CBP / QP / residual (mirrors the Intra path in h264_macroblock.h,
+   *     minus the I_16x16-specific DC-block handling which doesn't apply
+   *     to Inter macroblocks) -------------------------------------------
+   */
   uint32_t cbpCode = br.ue();
   if (cbpCode > 47 || br.error()) return false;
   uint8_t cbpCombined = kCbpInter[cbpCode];

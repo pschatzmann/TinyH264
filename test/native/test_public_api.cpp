@@ -1,8 +1,10 @@
-// Desktop-only test: exercise the public TinyH264Decoder facade (src/TinyH264Decoder.h)
-// exactly as an Arduino sketch would use it - write() driving the decode
-// loop internally and firing a callback per frame - on the known-good flat
-// 3-frame stream (validated pixel-exact via the lower-level API in
-// test_decode_flat_multi.cpp).
+/*
+ * Desktop-only test: exercise the public TinyH264Decoder facade (src/TinyH264Decoder.h)
+ * exactly as an Arduino sketch would use it - write() driving the decode
+ * loop internally and firing a callback per frame - on the known-good flat
+ * 3-frame stream (validated pixel-exact via the lower-level API in
+ * test_decode_flat_multi.cpp).
+ */
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>

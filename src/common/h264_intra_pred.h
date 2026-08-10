@@ -8,16 +8,20 @@
 #include "h264_mb_info.h"
 #include "h264_tables.h"
 
-// Header-only. Intra prediction, ITU-T H.264 clause 8.3. Operates directly
-// on the reconstructed pixels already sitting in the Frame buffer (raster
-// decode order guarantees any neighbor this code reads has already been
-// fully reconstructed - see h264_mb_info.h for why the luma 4x4 top-right
-// exception set {3,7,11,13,15} needs no separate bookkeeping).
+/*
+ * Header-only. Intra prediction, ITU-T H.264 clause 8.3. Operates directly
+ * on the reconstructed pixels already sitting in the Frame buffer (raster
+ * decode order guarantees any neighbor this code reads has already been
+ * fully reconstructed - see h264_mb_info.h for why the luma 4x4 top-right
+ * exception set {3,7,11,13,15} needs no separate bookkeeping).
+ */
 
 namespace tinyh264 {
 
-/// Intra_4x4 prediction modes (clause 8.3.1.2, Table 8-2). The nine
-/// directional/DC modes for a single 4x4 luma block; see predictIntra4x4().
+/**
+ * Intra_4x4 prediction modes (clause 8.3.1.2, Table 8-2). The nine
+ * directional/DC modes for a single 4x4 luma block; see predictIntra4x4().
+ */
 enum Intra4x4PredMode {
   kI4Vertical = 0,
   kI4Horizontal = 1,
@@ -30,8 +34,10 @@ enum Intra4x4PredMode {
   kI4HorizontalUp = 8,
 };
 
-/// Intra_16x16 prediction modes (clause 8.3.3, Table 7-11's mb_type
-/// decomposition); see predictIntra16x16().
+/**
+ * Intra_16x16 prediction modes (clause 8.3.3, Table 7-11's mb_type
+ * decomposition); see predictIntra16x16().
+ */
 enum Intra16x16PredMode {
   kI16Vertical = 0,
   kI16Horizontal = 1,
@@ -39,8 +45,10 @@ enum Intra16x16PredMode {
   kI16Plane = 3,
 };
 
-/// intra_chroma_pred_mode values (clause 8.3.4, Table 8-5); see
-/// predictIntraChromaPlane().
+/**
+ * intra_chroma_pred_mode values (clause 8.3.4, Table 8-5); see
+ * predictIntraChromaPlane().
+ */
 enum IntraChromaPredMode {
   kChromaDc = 0,
   kChromaHorizontal = 1,
@@ -48,9 +56,11 @@ enum IntraChromaPredMode {
   kChromaPlane = 3,
 };
 
-/// Luma 4x4 blocks whose "top-right" neighbor is never available, because
-/// (raster decode order within the MB, plus right-neighbor-MB never being
-/// decoded yet) it can't be - see h264_mb_info.h header comment.
+/**
+ * Luma 4x4 blocks whose "top-right" neighbor is never available, because
+ * (raster decode order within the MB, plus right-neighbor-MB never being
+ * decoded yet) it can't be - see h264_mb_info.h header comment.
+ */
 inline bool blk4x4TopRightAlwaysUnavailable(int blkIdx) {
   return blkIdx == 3 || blkIdx == 7 || blkIdx == 11 || blkIdx == 13 ||
          blkIdx == 15;
@@ -58,11 +68,13 @@ inline bool blk4x4TopRightAlwaysUnavailable(int blkIdx) {
 
 // --- 4x4 luma prediction --------------------------------------------------
 
-/// Reconstructed-sample neighborhood for one 4x4 luma block: the 4 left,
-/// top, and top-right samples plus the single top-left corner sample, and
-/// which of them are actually available (clause 6.4.9 neighbor
-/// derivation). Built by gatherNeighbors4x4(), consumed by
-/// predictIntra4x4().
+/**
+ * Reconstructed-sample neighborhood for one 4x4 luma block: the 4 left,
+ * top, and top-right samples plus the single top-left corner sample, and
+ * which of them are actually available (clause 6.4.9 neighbor
+ * derivation). Built by gatherNeighbors4x4(), consumed by
+ * predictIntra4x4().
+ */
 struct Neighbors4x4 {
   bool haveLeft = false, haveTop = false, haveTopLeft = false,
        haveTopRight = false;
@@ -72,12 +84,14 @@ struct Neighbors4x4 {
   uint8_t topLeft = 0;
 };
 
-/// Gathers the Neighbors4x4 for luma 4x4 block `blkIdx` at pixel position
-/// (px,py), given the enclosing macroblock's edge availability. Handles
-/// both purely-local neighbors (already reconstructed earlier blocks
-/// within this same macroblock) and cross-macroblock neighbors, plus the
-/// clause 8.3.1.2.1 top-right substitution (repeat the last top sample)
-/// when the true top-right neighbor doesn't exist.
+/**
+ * Gathers the Neighbors4x4 for luma 4x4 block `blkIdx` at pixel position
+ * (px,py), given the enclosing macroblock's edge availability. Handles
+ * both purely-local neighbors (already reconstructed earlier blocks
+ * within this same macroblock) and cross-macroblock neighbors, plus the
+ * clause 8.3.1.2.1 top-right substitution (repeat the last top sample)
+ * when the true top-right neighbor doesn't exist.
+ */
 template <typename Allocator>
 inline Neighbors4x4 gatherNeighbors4x4(const Frame<Allocator>& f, int px, int py,
                                         int blkIdx, bool mbLeftAvail,
@@ -119,14 +133,16 @@ inline Neighbors4x4 gatherNeighbors4x4(const Frame<Allocator>& f, int px, int py
   return n;
 }
 
-/// Predicts and writes one 4x4 luma block at pixel position (px,py) using
-/// the given mode (clause 8.3.1.2's nine Intra_4x4 modes) and neighbor
-/// samples, writing directly into the Frame (the caller adds the residual
-/// on top afterward). `n.haveTop`/`haveLeft` are assumed true for any mode
-/// other than kI4Dc that needs them - the mb_type/pred_mode signaling
-/// itself guarantees a non-DC mode is only ever coded when its required
-/// neighbors are available (clause 8.3.1.1), so only kI4Dc needs the
-/// explicit availability branches.
+/**
+ * Predicts and writes one 4x4 luma block at pixel position (px,py) using
+ * the given mode (clause 8.3.1.2's nine Intra_4x4 modes) and neighbor
+ * samples, writing directly into the Frame (the caller adds the residual
+ * on top afterward). `n.haveTop`/`haveLeft` are assumed true for any mode
+ * other than kI4Dc that needs them - the mb_type/pred_mode signaling
+ * itself guarantees a non-DC mode is only ever coded when its required
+ * neighbors are available (clause 8.3.1.1), so only kI4Dc needs the
+ * explicit availability branches.
+ */
 template <typename Allocator>
 inline void predictIntra4x4(Frame<Allocator>& f, int px, int py, int mode,
                              const Neighbors4x4& n) {
@@ -273,15 +289,19 @@ inline void predictIntra4x4(Frame<Allocator>& f, int px, int py, int mode,
   }
 }
 
-// --- Generic block DC/Vertical/Horizontal/Plane, shared by 16x16 luma and
-//     8x8 chroma (which don't have the 4x4's quirky diagonal modes) ------
+/*
+ * --- Generic block DC/Vertical/Horizontal/Plane, shared by 16x16 luma and
+ *     8x8 chroma (which don't have the 4x4's quirky diagonal modes) ------
+ */
 
-/// Computes the Plane-mode value at (x,y) within a size x size block
-/// (clause 8.3.3.4 for 16x16 luma, 8.3.4.4 for 8x8 chroma - same formula,
-/// different rounding constants selected by `size`), given full-length
-/// top[]/left[] arrays (size entries each) and topLeft. Shared by
-/// predictIntra16x16() and predictIntraChromaPlane() (the two block sizes
-/// that support Plane mode; 4x4 luma does not).
+/**
+ * Computes the Plane-mode value at (x,y) within a size x size block
+ * (clause 8.3.3.4 for 16x16 luma, 8.3.4.4 for 8x8 chroma - same formula,
+ * different rounding constants selected by `size`), given full-length
+ * top[]/left[] arrays (size entries each) and topLeft. Shared by
+ * predictIntra16x16() and predictIntraChromaPlane() (the two block sizes
+ * that support Plane mode; 4x4 luma does not).
+ */
 inline int planePredict(int x, int y, int size, const uint8_t* top,
                          const uint8_t* left, uint8_t topLeft) {
   int half = size / 2;
@@ -309,12 +329,14 @@ inline int planePredict(int x, int y, int size, const uint8_t* top,
 
 // --- 16x16 luma prediction ------------------------------------------------
 
-/// Predicts and writes a whole 16x16 luma macroblock (clause 8.3.3, the
-/// four Intra_16x16 modes), reading the macroblock's actual top/left
-/// neighbor availability directly (unlike 4x4, which relies on
-/// mode-signaling constraints, 16x16 DC handles unavailable neighbors
-/// explicitly since kI16Dc doesn't have that same guarantee at the whole-MB
-/// level for the topAvail-only/leftAvail-only/neither cases).
+/**
+ * Predicts and writes a whole 16x16 luma macroblock (clause 8.3.3, the
+ * four Intra_16x16 modes), reading the macroblock's actual top/left
+ * neighbor availability directly (unlike 4x4, which relies on
+ * mode-signaling constraints, 16x16 DC handles unavailable neighbors
+ * explicitly since kI16Dc doesn't have that same guarantee at the whole-MB
+ * level for the topAvail-only/leftAvail-only/neither cases).
+ */
 template <typename Allocator>
 inline void predictIntra16x16(Frame<Allocator>& f, int mbX, int mbY, int mode,
                                bool leftAvail, bool topAvail,
@@ -367,17 +389,19 @@ inline void predictIntra16x16(Frame<Allocator>& f, int mbX, int mbY, int mode,
 
 // --- Chroma (8x8 per plane, 4:2:0) prediction ------------------------------
 
-/// Predicts and writes one 8x8 chroma plane (Cb or Cr) for a macroblock,
-/// clause 8.3.4 (the four chroma prediction modes). Takes a raw plane
-/// pointer rather than a Frame, since it's called once per plane (u and
-/// v) with otherwise-identical arguments. The DC mode (clause 8.3.4.1)
-/// computes each of the four 4x4 quadrants' DC value independently rather
-/// than one 8x8-wide average - see the FFmpeg-cross-checked formulas
-/// inline below for exactly which neighbor samples each quadrant uses
-/// (this is the code that had a bottom-right-quadrant bug, since fixed:
-/// when both top and left are available, the bottom-right quadrant's DC
-/// is the combined average of top[4..7] AND left[4..7], not one side
-/// alone - matching FFmpeg's pred8x8_dc/h264pred_template.c).
+/**
+ * Predicts and writes one 8x8 chroma plane (Cb or Cr) for a macroblock,
+ * clause 8.3.4 (the four chroma prediction modes). Takes a raw plane
+ * pointer rather than a Frame, since it's called once per plane (u and
+ * v) with otherwise-identical arguments. The DC mode (clause 8.3.4.1)
+ * computes each of the four 4x4 quadrants' DC value independently rather
+ * than one 8x8-wide average - see the FFmpeg-cross-checked formulas
+ * inline below for exactly which neighbor samples each quadrant uses
+ * (this is the code that had a bottom-right-quadrant bug, since fixed:
+ * when both top and left are available, the bottom-right quadrant's DC
+ * is the combined average of top[4..7] AND left[4..7], not one side
+ * alone - matching FFmpeg's pred8x8_dc/h264pred_template.c).
+ */
 inline void predictIntraChromaPlane(uint8_t* plane, int stride, int px,
                                      int py, int mode, bool leftAvail,
                                      bool topAvail, bool topLeftAvail) {
@@ -404,8 +428,10 @@ inline void predictIntraChromaPlane(uint8_t* plane, int stride, int px,
           break;
         case kChromaDc:
         default: {
-          // Each 4x4 quadrant of the 8x8 chroma block computes its own DC,
-          // clause 8.3.4.1 - not a simple 8x8-wide average.
+          /*
+           * Each 4x4 quadrant of the 8x8 chroma block computes its own DC,
+           * clause 8.3.4.1 - not a simple 8x8-wide average.
+           */
           int qx = (x >> 2) * 4, qy = (y >> 2) * 4;  // quadrant origin 0 or 4
           bool topQuad = (qx == 4 && qy == 0);
           bool leftQuad = (qx == 0 && qy == 4);

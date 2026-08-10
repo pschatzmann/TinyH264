@@ -1,8 +1,10 @@
-// Desktop-only test: decode ALL frames (1 IDR + 9 P) of the real QCIF
-// baseline/CAVLC stream and compare each pixel-for-pixel against ffmpeg's
-// own decode of the same stream. This is the oracle for P-slice support:
-// motion vector prediction, motion compensation, and reference-frame
-// management all have to be correct simultaneously for this to match.
+/*
+ * Desktop-only test: decode ALL frames (1 IDR + 9 P) of the real QCIF
+ * baseline/CAVLC stream and compare each pixel-for-pixel against ffmpeg's
+ * own decode of the same stream. This is the oracle for P-slice support:
+ * motion vector prediction, motion compensation, and reference-frame
+ * management all have to be correct simultaneously for this to match.
+ */
 #include <cstdio>
 #include <cstdlib>
 #include <vector>

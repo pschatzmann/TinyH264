@@ -1,24 +1,28 @@
 #pragma once
 #include <stdint.h>
 
-// Header-only. Raw CAVLC VLC table constants (ITU-T H.264 Table 9-5
-// coeff_token, Table 9-7/9-8 total_zeros, Table 9-9 chroma DC total_zeros,
-// Table 9-10 run_before).
-//
-// Transcribed from FFmpeg's libavcodec/h264_cavlc.c (LGPL, Michael
-// Niedermayer et al.) rather than from memory, to avoid silent transcription
-// errors in these exact bit-pattern constants; cross-checked against the
-// spec's combinatorial structure (see h264_cavlc.h). Layout kept as
-// {length, bits} pairs so a small generic prefix-code matcher (see
-// decodeVlc() in h264_cavlc.h) can decode any of them without per-table
-// special-casing.
+/*
+ * Header-only. Raw CAVLC VLC table constants (ITU-T H.264 Table 9-5
+ * coeff_token, Table 9-7/9-8 total_zeros, Table 9-9 chroma DC total_zeros,
+ * Table 9-10 run_before).
+ *
+ * Transcribed from FFmpeg's libavcodec/h264_cavlc.c (LGPL, Michael
+ * Niedermayer et al.) rather than from memory, to avoid silent transcription
+ * errors in these exact bit-pattern constants; cross-checked against the
+ * spec's combinatorial structure (see h264_cavlc.h). Layout kept as
+ * {length, bits} pairs so a small generic prefix-code matcher (see
+ * decodeVlc() in h264_cavlc.h) can decode any of them without per-table
+ * special-casing.
+ */
 
 namespace tinyh264 {
 
-// coeff_token, indexed [table][TotalCoeff*4 + TrailingOnes], table in
-// {0,1,2,3} selected by nC range (see nCToCoeffTokenTable() in h264_cavlc.h).
-// Table 3 (nC>=8) is a closed-form FLC, not actually looked up via this
-// array, but is included for completeness/self-checking.
+/*
+ * coeff_token, indexed [table][TotalCoeff*4 + TrailingOnes], table in
+ * {0,1,2,3} selected by nC range (see nCToCoeffTokenTable() in h264_cavlc.h).
+ * Table 3 (nC>=8) is a closed-form FLC, not actually looked up via this
+ * array, but is included for completeness/self-checking.
+ */
 static const uint8_t kCoeffTokenLen[4][4 * 17] = {
     {
         1, 0, 0, 0,
@@ -81,8 +85,10 @@ static const uint8_t kCoeffTokenBits[4][4 * 17] = {
     }
 };
 
-// Chroma DC (2x2, 4:2:0) coeff_token, indexed [TotalCoeff*4 + TrailingOnes],
-// TotalCoeff 0..4.
+/*
+ * Chroma DC (2x2, 4:2:0) coeff_token, indexed [TotalCoeff*4 + TrailingOnes],
+ * TotalCoeff 0..4.
+ */
 static const uint8_t kChromaDcCoeffTokenLen[4 * 5] = {
     2, 0, 0, 0,
     6, 1, 0, 0,
@@ -98,10 +104,12 @@ static const uint8_t kChromaDcCoeffTokenBits[4 * 5] = {
     2, 3, 2, 0,
 };
 
-// total_zeros for luma/chroma-AC 4x4 blocks (Table 9-7/9-8). Row index =
-// TotalCoeff - 1 (rows for TotalCoeff 1..15; TotalCoeff==16 implies
-// zeros_left == 0 with nothing coded, handled by the caller). Row i has
-// (16 - i) valid entries for total_zeros = 0 .. (15 - i).
+/*
+ * total_zeros for luma/chroma-AC 4x4 blocks (Table 9-7/9-8). Row index =
+ * TotalCoeff - 1 (rows for TotalCoeff 1..15; TotalCoeff==16 implies
+ * zeros_left == 0 with nothing coded, handled by the caller). Row i has
+ * (16 - i) valid entries for total_zeros = 0 .. (15 - i).
+ */
 static const uint8_t kTotalZerosLen[15][16] = {
     {1,3,3,4,4,5,5,6,6,7,7,8,8,9,9,9},
     {3,3,3,3,3,4,4,4,4,5,5,6,6,6,6},
@@ -137,8 +145,10 @@ static const uint8_t kTotalZerosBits[15][16] = {
     {0,1},
 };
 
-// total_zeros for chroma DC (2x2, 4:2:0) blocks (Table 9-9a). Row index =
-// TotalCoeff - 1 (TotalCoeff 1..3). Row i has (4 - i) valid entries.
+/*
+ * total_zeros for chroma DC (2x2, 4:2:0) blocks (Table 9-9a). Row index =
+ * TotalCoeff - 1 (TotalCoeff 1..3). Row i has (4 - i) valid entries.
+ */
 static const uint8_t kChromaDcTotalZerosLen[3][4] = {
     {1, 2, 3, 3},
     {1, 2, 2, 0},
@@ -150,9 +160,11 @@ static const uint8_t kChromaDcTotalZerosBits[3][4] = {
     {1, 0, 0, 0},
 };
 
-// run_before (Table 9-10). Rows 0..5 = zerosLeft 1..6 (row i has (i+2)
-// valid entries for run_before 0..(i+1)). Row 6 = the "more than 6" table,
-// 15 valid entries for run_before 0..14.
+/*
+ * run_before (Table 9-10). Rows 0..5 = zerosLeft 1..6 (row i has (i+2)
+ * valid entries for run_before 0..(i+1)). Row 6 = the "more than 6" table,
+ * 15 valid entries for run_before 0..14.
+ */
 static const uint8_t kRunBeforeLen[7][16] = {
     {1,1},
     {1,2,2},
@@ -172,13 +184,15 @@ static const uint8_t kRunBeforeBits[7][16] = {
     {7,6,5,4,3,2,1,1,1,1,1,1,1,1,1},
 };
 
-/// Selects which of the 4 coeff_token VLC tables (Table 9-5) applies for a
-/// given nC context, clause 9.2.1: table 0 for nC in [0,2), 1 for [2,4),
-/// 2 for [4,8); nC >= 8 uses a fixed-length code handled separately by the
-/// caller rather than through this table selection. Shared by both the
-/// decoder's coeff_token matcher (decoder/h264_cavlc.h) and the encoder's
-/// coeff_token writer (encoder/h264_cavlc_encode.h) - both directions need
-/// the exact same nC-to-table mapping.
+/**
+ * Selects which of the 4 coeff_token VLC tables (Table 9-5) applies for a
+ * given nC context, clause 9.2.1: table 0 for nC in [0,2), 1 for [2,4),
+ * 2 for [4,8); nC >= 8 uses a fixed-length code handled separately by the
+ * caller rather than through this table selection. Shared by both the
+ * decoder's coeff_token matcher (decoder/h264_cavlc.h) and the encoder's
+ * coeff_token writer (encoder/h264_cavlc_encode.h) - both directions need
+ * the exact same nC-to-table mapping.
+ */
 inline int nCToCoeffTokenTable(int nC) {
   if (nC < 2) return 0;
   if (nC < 4) return 1;

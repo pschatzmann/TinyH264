@@ -16,14 +16,16 @@ static void test_u() {
 }
 
 static void test_ue() {
-  // Exp-Golomb codes for 0,1,2,3,4 concatenated:
-  // 0 -> 1
-  // 1 -> 010
-  // 2 -> 011
-  // 3 -> 00100
-  // 4 -> 00101
-  // bitstream: 1 010 011 00100 00101  (17 bits) padded to 3 bytes with zeros
-  // 1 010011 00100001 01000000
+  /*
+   * Exp-Golomb codes for 0,1,2,3,4 concatenated:
+   * 0 -> 1
+   * 1 -> 010
+   * 2 -> 011
+   * 3 -> 00100
+   * 4 -> 00101
+   * bitstream: 1 010 011 00100 00101  (17 bits) padded to 3 bytes with zeros
+   * 1 010011 00100001 01000000
+   */
   uint8_t data[] = {0b10100110, 0b01000010, 0b10000000};
   BitReader br(data, 3);
   assert(br.ue() == 0);
@@ -46,8 +48,10 @@ static void test_se() {
 }
 
 static void test_more_rbsp_data() {
-  // RBSP: one byte 0xA0 = 1010 0000, then stop bit is bit index 1 (the last
-  // '1'). After consuming 2 bits, more_rbsp_data() should be false.
+  /*
+   * RBSP: one byte 0xA0 = 1010 0000, then stop bit is bit index 1 (the last
+   * '1'). After consuming 2 bits, more_rbsp_data() should be false.
+   */
   uint8_t data[] = {0xA0};
   BitReader br(data, 1);
   assert(br.moreRbspData() == true);

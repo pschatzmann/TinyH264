@@ -1,25 +1,27 @@
-// Desktop-only test: encodes a real 10-frame QCIF sequence
-// (assets/all_frames_ref.yuv - the same real motion-content oracle
-// test_decode_multiframe.cpp uses on the decode side, so this exercises
-// genuine inter-frame motion, not a synthetic/static pattern) as 1
-// I-frame + 9 P-frames via TinyH264Encoder::encodeIFrame()/
-// encodePFrame(), then decodes the whole sequence back with this
-// project's own TinyH264Decoder and checks:
-// 1. All 10 frames decode without error.
-// 2. Real quality (PSNR against the original source) clears a floor -
-//    catches a regression that's syntactically valid but has stopped
-//    meaningfully predicting from the reference (e.g. a broken motion
-//    search always landing on (0,0), or MV prediction/encoding drifting
-//    off over several P-frames in a way a single-I-frame test could
-//    never catch).
-//
-// Development-time cross-check (not re-run here, needs ffmpeg + shelling
-// out): the identical encode was decoded with real `ffmpeg` and found
-// bit-exact, all 10 frames, against this project's own reconstruction
-// (0/25344 luma mismatches per frame) - see
-// h264_macroblock_encode_inter.h's own comments for the P-frame scope
-// (P_16x16/P_Skip only, single reference, integer-pel-only motion
-// search) this verification was run against.
+/*
+ * Desktop-only test: encodes a real 10-frame QCIF sequence
+ * (assets/all_frames_ref.yuv - the same real motion-content oracle
+ * test_decode_multiframe.cpp uses on the decode side, so this exercises
+ * genuine inter-frame motion, not a synthetic/static pattern) as 1
+ * I-frame + 9 P-frames via TinyH264Encoder::encodeFrame() (automatic
+ * I/P dispatch), then decodes the whole sequence back with this
+ * project's own TinyH264Decoder and checks:
+ * 1. All 10 frames decode without error.
+ * 2. Real quality (PSNR against the original source) clears a floor -
+ *    catches a regression that's syntactically valid but has stopped
+ *    meaningfully predicting from the reference (e.g. a broken motion
+ *    search always landing on (0,0), or MV prediction/encoding drifting
+ *    off over several P-frames in a way a single-I-frame test could
+ *    never catch).
+ *
+ * Development-time cross-check (not re-run here, needs ffmpeg + shelling
+ * out): the identical encode was decoded with real `ffmpeg` and found
+ * bit-exact, all 10 frames, against this project's own reconstruction
+ * (0/25344 luma mismatches per frame) - see
+ * h264_macroblock_encode_inter.h's own comments for the P-frame scope
+ * (P_16x16/P_Skip only, single reference, integer-pel-only motion
+ * search) this verification was run against.
+ */
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -81,10 +83,12 @@ int main() {
   enc.setSize(W, H);
   enc.setQp(qp);
 
-  // Frame 0 has no reference yet, so encodeFrame() encodes it as an
-  // I-frame automatically; every frame after that becomes a P-frame
-  // against the previous one - encodeFrame() is the only public encode
-  // entry point now (see TinyH264Encoder.h's own header comment).
+  /*
+   * Frame 0 has no reference yet, so encodeFrame() encodes it as an
+   * I-frame automatically; every frame after that becomes a P-frame
+   * against the previous one - encodeFrame() is the only public encode
+   * entry point now (see TinyH264Encoder.h's own header comment).
+   */
   for (int i = 0; i < numFrames; i++) {
     const uint8_t* frame = allFrames.data() + (size_t)i * FRAME_SIZE;
     const uint8_t* srcY = frame;
@@ -114,8 +118,10 @@ int main() {
 
   double mse = st.sumSq / ((double)W * H * numFrames);
   double psnr = mse > 0 ? 10 * log10(255.0 * 255.0 / mse) : 999.0;
-  // Floor well below the real measured value (43.14dB at qp=26, real
-  // ffmpeg cross-check) - real margin, not a guessed round number.
+  /*
+   * Floor well below the real measured value (43.14dB at qp=26, real
+   * ffmpeg cross-check) - real margin, not a guessed round number.
+   */
   const double kFloor = 38.0;
   if (psnr < kFloor) {
     printf("FAIL: PSNR %.2fdB below floor %.2fdB (%d frames, %zu bytes)\n",

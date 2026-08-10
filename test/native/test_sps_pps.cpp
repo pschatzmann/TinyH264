@@ -1,6 +1,8 @@
-// Desktop-only test: parse the real SPS/PPS from the ffmpeg-encoded QCIF
-// baseline/CAVLC stream and check derived values against ground truth from
-// ffprobe (176x144, Constrained Baseline profile == profile_idc 66).
+/*
+ * Desktop-only test: parse the real SPS/PPS from the ffmpeg-encoded QCIF
+ * baseline/CAVLC stream and check derived values against ground truth from
+ * ffprobe (176x144, Constrained Baseline profile == profile_idc 66).
+ */
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>

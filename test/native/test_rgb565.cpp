@@ -1,22 +1,24 @@
-// Desktop-only test: converts a real decoded frame's reference YUV (the
-// same oracle used by the other pixel-exact tests) to RGB565 and compares
-// every pixel against ffmpeg's own `-pix_fmt rgb565le` conversion of the
-// same YUV data. This is the oracle for h264_rgb.h's YUV->RGB
-// conversion - the integer BT.601 coefficients were independently
-// re-derived from the published matrix, and this test confirms the
-// fixed-point rounding is *close* to a real, independent implementation,
-// not just "looks right" by inspection.
-//
-// Not held to literal bit-exact matching, unlike this project's decode
-// tests: ffmpeg's swscale uses 16-bit-precision internal conversion
-// tables, while h264_rgb.h deliberately uses a much cheaper 8-bit
-// fixed-point formula (the standard, widely-used embedded/mobile
-// approach - a 65536-entry table isn't appropriate for this library's
-// memory budget). Verified (once, by exhaustive per-pixel diff over a
-// real frame) that this never differs from ffmpeg's output by more than
-// 1 LSB in any single 5/6-bit RGB565 channel - an imperceptible,
-// expected precision difference, not a bug. This test enforces that
-// bound rather than exact equality.
+/*
+ * Desktop-only test: converts a real decoded frame's reference YUV (the
+ * same oracle used by the other pixel-exact tests) to RGB565 and compares
+ * every pixel against ffmpeg's own `-pix_fmt rgb565le` conversion of the
+ * same YUV data. This is the oracle for h264_rgb.h's YUV->RGB
+ * conversion - the integer BT.601 coefficients were independently
+ * re-derived from the published matrix, and this test confirms the
+ * fixed-point rounding is *close* to a real, independent implementation,
+ * not just "looks right" by inspection.
+ *
+ * Not held to literal bit-exact matching, unlike this project's decode
+ * tests: ffmpeg's swscale uses 16-bit-precision internal conversion
+ * tables, while h264_rgb.h deliberately uses a much cheaper 8-bit
+ * fixed-point formula (the standard, widely-used embedded/mobile
+ * approach - a 65536-entry table isn't appropriate for this library's
+ * memory budget). Verified (once, by exhaustive per-pixel diff over a
+ * real frame) that this never differs from ffmpeg's output by more than
+ * 1 LSB in any single 5/6-bit RGB565 channel - an imperceptible,
+ * expected precision difference, not a bug. This test enforces that
+ * bound rather than exact equality.
+ */
 #include <cstdio>
 #include <cstdlib>
 #include <vector>

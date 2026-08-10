@@ -1,29 +1,31 @@
-// Desktop-only test: verifies TinyH264Encoder's rate control
-// (setTargetBitrate() + qp = -1, encoder/h264_encoder.h's
-// resolveQp()/updateRateControl()) against a real 10-frame QCIF sequence
-// (assets/all_frames_ref.yuv, the same real motion-content oracle
-// test_encode_pframe.cpp uses). Encodes the same sequence at three very
-// different target bitrates (well below, close to, and well above what
-// a fixed qp=26 encode of this content naturally produces - ~293kbps,
-// see test_encode_pframe.cpp's 14677-byte/10-frame result at 25fps) and
-// checks, at each target:
-// 1. QP actually moves in the correct direction (up/coarser for a lower
-//    target, down/finer for a higher one) - not just "some number came
-//    out", the core claim rate control makes.
-// 2. The resulting stream still decodes cleanly via this project's own
-//    TinyH264Decoder (varying per-frame QP, via slice_qp_delta, is new
-//    surface a fixed-QP test never exercises).
-// 3. Actual average bitrate lands within a generous factor of the
-//    target - this is a simple, real-time proportional controller (not
-//    a tuned two-pass encoder), and 10 frames is a short convergence
-//    window, so the bound here is deliberately loose (0.4x-2x) rather
-//    than tight; the *direction* check above is the precise assertion.
-//
-// Development-time cross-check (not re-run here): the same three
-// streams were also decoded with real `ffmpeg` (0 decode errors on all
-// three, including the varying-QP case) - see
-// encoder/h264_encoder.h's updateRateControl() comment for the
-// controller's exact behavior.
+/*
+ * Desktop-only test: verifies TinyH264Encoder's rate control
+ * (setTargetBitrate() + qp = -1, encoder/h264_encoder.h's
+ * resolveQp()/updateRateControl()) against a real 10-frame QCIF sequence
+ * (assets/all_frames_ref.yuv, the same real motion-content oracle
+ * test_encode_pframe.cpp uses). Encodes the same sequence at three very
+ * different target bitrates (well below, close to, and well above what
+ * a fixed qp=26 encode of this content naturally produces - ~293kbps,
+ * see test_encode_pframe.cpp's 14677-byte/10-frame result at 25fps) and
+ * checks, at each target:
+ * 1. QP actually moves in the correct direction (up/coarser for a lower
+ *    target, down/finer for a higher one) - not just "some number came
+ *    out", the core claim rate control makes.
+ * 2. The resulting stream still decodes cleanly via this project's own
+ *    TinyH264Decoder (varying per-frame QP, via slice_qp_delta, is new
+ *    surface a fixed-QP test never exercises).
+ * 3. Actual average bitrate lands within a generous factor of the
+ *    target - this is a simple, real-time proportional controller (not
+ *    a tuned two-pass encoder), and 10 frames is a short convergence
+ *    window, so the bound here is deliberately loose (0.4x-2x) rather
+ *    than tight; the *direction* check above is the precise assertion.
+ *
+ * Development-time cross-check (not re-run here): the same three
+ * streams were also decoded with real `ffmpeg` (0 decode errors on all
+ * three, including the varying-QP case) - see
+ * encoder/h264_encoder.h's updateRateControl() comment for the
+ * controller's exact behavior.
+ */
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -56,9 +58,11 @@ void decodeCheckCallback(TinyH264Decoder<>& /*d*/, void* userData) {
   (*(int*)userData)++;
 }
 
-/// Encodes the sequence at `targetBps` and returns (lastQp, actual average
-/// bps) - also asserts the stream decodes cleanly via this project's own
-/// decoder before returning (a FAIL here aborts via failures++/return).
+/**
+ * Encodes the sequence at `targetBps` and returns (lastQp, actual average
+ * bps) - also asserts the stream decodes cleanly via this project's own
+ * decoder before returning (a FAIL here aborts via failures++/return).
+ */
 struct RcResult { int firstPQp; int lastQp; double actualBps; bool ok; };
 
 RcResult runAt(const std::vector<uint8_t>& allFrames, int numFrames,
@@ -83,8 +87,10 @@ RcResult runAt(const std::vector<uint8_t>& allFrames, int numFrames,
       return r;
     }
     if (i == 1) r.firstPQp = enc.lastQp();  // first *adapted* QP (frame 0
-                                              // always starts at the
-                                              // controller's initial guess)
+                                              /*
+                                               * always starts at the
+                                               * controller's initial guess)
+                                               */
     total += n;
   }
   r.lastQp = enc.lastQp();
@@ -111,8 +117,10 @@ int main() {
     return 1;
   }
 
-  // Baseline: what fixed qp=26 gives this content (matches
-  // test_encode_pframe.cpp's own real, measured 14677 bytes/10 frames).
+  /*
+   * Baseline: what fixed qp=26 gives this content (matches
+   * test_encode_pframe.cpp's own real, measured 14677 bytes/10 frames).
+   */
   const int kBaselineQp = 26;
 
   RcResult low = runAt(allFrames, numFrames, 150000);   // well below baseline
@@ -129,9 +137,11 @@ int main() {
     printf("target=600000: qp %d->%d, %.0f bps\n", kBaselineQp, high.lastQp,
            high.actualBps);
 
-    // Direction: a lower target must end up at a QP >= the baseline
-    // (coarser or equal), a higher target at a QP <= baseline (finer or
-    // equal) - the core claim rate control makes.
+    /*
+     * Direction: a lower target must end up at a QP >= the baseline
+     * (coarser or equal), a higher target at a QP <= baseline (finer or
+     * equal) - the core claim rate control makes.
+     */
     if (low.lastQp < kBaselineQp) {
       printf("FAIL: low-bitrate target didn't raise QP (%d, want >= %d)\n",
              low.lastQp, kBaselineQp);

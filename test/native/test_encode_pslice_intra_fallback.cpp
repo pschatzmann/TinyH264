@@ -1,35 +1,37 @@
-// Desktop-only test: verifies the Intra-macroblock-inside-a-P-slice
-// fallback (shouldUseIntraInPSlice(), h264_macroblock_encode_inter.h;
-// wired into Encoder::encodePFrame(), h264_encoder.h) both round-trips
-// correctly and actually helps - not just "doesn't crash." Encodes a
-// deliberate, genuine scene cut: assets/frame0_ref.yuv as the I-frame,
-// then assets/flat_frame0_ref.yuv (a real, completely different image -
-// average luma differs by ~62/255 per pixel) as the "next frame", so
-// motion-compensated prediction from the I-frame is a *bad* match by
-// construction - exactly the scenario the fallback exists for.
-//
-// Compares two encodes of the same scene-cut P-frame: the real
-// Encoder::encodePFrame() (fallback enabled) against
-// encodePFrameNoFallback() below, a thin local reimplementation of the
-// same macroblock loop with the Intra-fallback decision hardwired off
-// (mirroring test_encode_i4x4.cpp's own encodeAlwaysI16x16() pattern) -
-// the "before this feature existed" baseline. Checks:
-// 1. Self-decode bit-exactness (same bar every other encode test holds).
-// 2. The fallback-enabled encode is not larger AND not lower quality
-//    than the no-fallback baseline - on a genuine scene cut, a mode-
-//    decision bug that never actually triggers the fallback would still
-//    pass a bit-exactness check trivially, so this is the test that
-//    actually exercises the decision logic, not just the syntax it
-//    writes.
-//
-// Development-time cross-check (not re-run here): the same scene-cut
-// stream was also decoded with real `ffmpeg` and found bit-exact against
-// this project's own reconstruction (0/25344 luma mismatches) - see
-// shouldUseIntraInPSlice()'s own comment for the heuristic this
-// verification was run against, and for real numbers from this
-// development-time check (356 bytes / 48.1dB with the fallback vs. 8571
-// bytes / 34.0dB without it on this same scene cut - smaller *and*
-// better, not a tradeoff).
+/*
+ * Desktop-only test: verifies the Intra-macroblock-inside-a-P-slice
+ * fallback (shouldUseIntraInPSlice(), h264_macroblock_encode_inter.h;
+ * wired into Encoder::encodePFrame(), h264_encoder.h) both round-trips
+ * correctly and actually helps - not just "doesn't crash." Encodes a
+ * deliberate, genuine scene cut: assets/frame0_ref.yuv as the I-frame,
+ * then assets/flat_frame0_ref.yuv (a real, completely different image -
+ * average luma differs by ~62/255 per pixel) as the "next frame", so
+ * motion-compensated prediction from the I-frame is a *bad* match by
+ * construction - exactly the scenario the fallback exists for.
+ *
+ * Compares two encodes of the same scene-cut P-frame: the real
+ * Encoder::encodePFrame() (fallback enabled) against
+ * encodePFrameNoFallback() below, a thin local reimplementation of the
+ * same macroblock loop with the Intra-fallback decision hardwired off
+ * (mirroring test_encode_i4x4.cpp's own encodeAlwaysI16x16() pattern) -
+ * the "before this feature existed" baseline. Checks:
+ * 1. Self-decode bit-exactness (same bar every other encode test holds).
+ * 2. The fallback-enabled encode is not larger AND not lower quality
+ *    than the no-fallback baseline - on a genuine scene cut, a mode-
+ *    decision bug that never actually triggers the fallback would still
+ *    pass a bit-exactness check trivially, so this is the test that
+ *    actually exercises the decision logic, not just the syntax it
+ *    writes.
+ *
+ * Development-time cross-check (not re-run here): the same scene-cut
+ * stream was also decoded with real `ffmpeg` and found bit-exact against
+ * this project's own reconstruction (0/25344 luma mismatches) - see
+ * shouldUseIntraInPSlice()'s own comment for the heuristic this
+ * verification was run against, and for real numbers from this
+ * development-time check (356 bytes / 48.1dB with the fallback vs. 8571
+ * bytes / 34.0dB without it on this same scene cut - smaller *and*
+ * better, not a tradeoff).
+ */
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -59,11 +61,13 @@ static std::vector<uint8_t> readFile(const char* path) {
 static const int W = 176, H = 144;
 int failures = 0;
 
-/// Thin reimplementation of Encoder::encodePFrame()'s macroblock loop
-/// with the Intra-fallback decision hardwired off (always Inter/Skip) -
-/// this test's "before this feature existed" baseline, so bytes/quality
-/// can be compared apples-to-apples against the real encodePFrame() (which
-/// makes the real per-macroblock choice) on the same scene-cut input.
+/**
+ * Thin reimplementation of Encoder::encodePFrame()'s macroblock loop
+ * with the Intra-fallback decision hardwired off (always Inter/Skip) -
+ * this test's "before this feature existed" baseline, so bytes/quality
+ * can be compared apples-to-apples against the real encodePFrame() (which
+ * makes the real per-macroblock choice) on the same scene-cut input.
+ */
 size_t encodePFrameNoFallback(Frame<>& refFrame, MbInfoTable& mbInfo,
                                const uint8_t* srcY, int srcStrideY,
                                const uint8_t* srcU, const uint8_t* srcV,
@@ -150,9 +154,11 @@ int main() {
   const uint8_t* srcV1 = srcU1 + (size_t)(W / 2) * (H / 2);
   const int qp = 26;
 
-  // Real encode, fallback enabled. Fresh encoder, no reference yet, so
-  // the first encodeFrame() call is an I-frame automatically; the second
-  // (same size, reference now established) becomes the scene-cut P-frame.
+  /*
+   * Real encode, fallback enabled. Fresh encoder, no reference yet, so
+   * the first encodeFrame() call is an I-frame automatically; the second
+   * (same size, reference now established) becomes the scene-cut P-frame.
+   */
   TinyH264Encoder<> enc;
   std::vector<uint8_t> bs(200000);
   enc.setSize(W, H);
@@ -178,12 +184,14 @@ int main() {
 
   double fallbackPsnr = psnrY(enc.y(), enc.strideY(), srcY1);
 
-  // Baseline: same scene cut, fallback hardwired off. Encodes its own
-  // fresh I-frame (rather than reusing `enc`'s) so its reference frame
-  // is captured independently, keeping the two encodes fully separate.
-  // Uses the internal Encoder<> directly (not the TinyH264Encoder public
-  // wrapper) since it exposes frame() - needed to seed
-  // encodePFrameNoFallback()'s own reference frame.
+  /*
+   * Baseline: same scene cut, fallback hardwired off. Encodes its own
+   * fresh I-frame (rather than reusing `enc`'s) so its reference frame
+   * is captured independently, keeping the two encodes fully separate.
+   * Uses the internal Encoder<> directly (not the TinyH264Encoder public
+   * wrapper) since it exposes frame() - needed to seed
+   * encodePFrameNoFallback()'s own reference frame.
+   */
   Encoder<> encBaseline;
   std::vector<uint8_t> bsBaseline(200000);
   encBaseline.setSize(W, H);
@@ -220,9 +228,11 @@ int main() {
            fallbackPsnr, baselinePsnr);
     failures++;
   }
-  // The fallback should be a clear win on a genuine scene cut, not just
-  // "not worse" - assert a real margin, matching the actual measured
-  // gap (356 vs 8571 bytes, 48.1 vs 34.0dB) with generous headroom.
+  /*
+   * The fallback should be a clear win on a genuine scene cut, not just
+   * "not worse" - assert a real margin, matching the actual measured
+   * gap (356 vs 8571 bytes, 48.1 vs 34.0dB) with generous headroom.
+   */
   if (n1 > nb1 / 2) {
     printf("FAIL: expected the fallback to meaningfully shrink this scene "
            "cut's P-frame (got %zu vs %zu bytes, wanted <= half)\n",

@@ -1,10 +1,12 @@
-// Desktop-only test: decode the first (IDR) frame of the real QCIF
-// baseline/CAVLC stream with the actual TinyH264 decoder pipeline, and
-// compare it pixel-for-pixel against ffmpeg's own decode of the same
-// frame (assets/flat_frame0_ref.yuv, raw yuv420p). This is the real oracle for
-// everything built so far: CAVLC tables, macroblock layer, intra
-// prediction, and dequant/transform all have to be correct simultaneously
-// for this to match.
+/*
+ * Desktop-only test: decode the first (IDR) frame of the real QCIF
+ * baseline/CAVLC stream with the actual TinyH264 decoder pipeline, and
+ * compare it pixel-for-pixel against ffmpeg's own decode of the same
+ * frame (assets/flat_frame0_ref.yuv, raw yuv420p). This is the real oracle for
+ * everything built so far: CAVLC tables, macroblock layer, intra
+ * prediction, and dequant/transform all have to be correct simultaneously
+ * for this to match.
+ */
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>

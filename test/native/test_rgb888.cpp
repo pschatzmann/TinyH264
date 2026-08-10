@@ -1,23 +1,25 @@
-// Desktop-only test: converts a real decoded frame's reference YUV (the
-// same oracle used by the other pixel-exact tests) to RGB888 and compares
-// every byte against ffmpeg's own `-pix_fmt rgb24` conversion of the same
-// YUV data - the oracle for h264_rgb.h's RGB888 path (same BT.601
-// coefficients as RGB565, packed at full 8-bit precision this time
-// instead of 5-6-5, so equality here is a stronger check than RGB565's).
-//
-// Same root cause as test_rgb565.cpp's tolerance (ffmpeg's swscale uses
-// 16-bit-precision internal tables, this library's fixed-point formula
-// is 8-bit), but with a *wider* observed bound here: RGB565's 5/6-bit
-// truncation absorbs most of that rounding noise before it's visible,
-// while RGB888 keeps full 8-bit precision, so the same underlying
-// difference shows up larger. Empirically verified (exhaustive per-byte
-// diff over a real frame, including a quick experiment with
-// higher-precision - 16-bit-scaled - coefficients that did *not*
-// meaningfully improve the match rate, suggesting the residual gap is a
-// genuine algorithmic difference from ffmpeg's specific rounding choices,
-// not just insufficient precision) that the worst single-channel
-// difference is 3/255 - imperceptible, but tracked here as an explicit,
-// justified bound rather than a guess.
+/*
+ * Desktop-only test: converts a real decoded frame's reference YUV (the
+ * same oracle used by the other pixel-exact tests) to RGB888 and compares
+ * every byte against ffmpeg's own `-pix_fmt rgb24` conversion of the same
+ * YUV data - the oracle for h264_rgb.h's RGB888 path (same BT.601
+ * coefficients as RGB565, packed at full 8-bit precision this time
+ * instead of 5-6-5, so equality here is a stronger check than RGB565's).
+ *
+ * Same root cause as test_rgb565.cpp's tolerance (ffmpeg's swscale uses
+ * 16-bit-precision internal tables, this library's fixed-point formula
+ * is 8-bit), but with a *wider* observed bound here: RGB565's 5/6-bit
+ * truncation absorbs most of that rounding noise before it's visible,
+ * while RGB888 keeps full 8-bit precision, so the same underlying
+ * difference shows up larger. Empirically verified (exhaustive per-byte
+ * diff over a real frame, including a quick experiment with
+ * higher-precision - 16-bit-scaled - coefficients that did *not*
+ * meaningfully improve the match rate, suggesting the residual gap is a
+ * genuine algorithmic difference from ffmpeg's specific rounding choices,
+ * not just insufficient precision) that the worst single-channel
+ * difference is 3/255 - imperceptible, but tracked here as an explicit,
+ * justified bound rather than a guess.
+ */
 #include <cstdio>
 #include <cstdlib>
 #include <vector>

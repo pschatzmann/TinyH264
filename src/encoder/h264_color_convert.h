@@ -3,30 +3,32 @@
 #include <stddef.h>
 #include "../common/h264_transform.h"  // clip255()
 
-// Header-only. Packed-pixel-format -> YUV 4:2:0 planar conversion, for
-// encodeIFrame*() callers whose source data isn't already three separate
-// Y/U/V planes (e.g. a camera module's native YUV422/RGB565 output, or an
-// RGB888/RGB666 framebuffer). This is the *forward* direction (encoder
-// input) - the mirror image of decoder/h264_rgb.h's YUV->RGB output
-// conversion, not a reuse of it (a genuinely different operation, so it
-// lives in encoder/ rather than common/ - nothing on the decode side
-// needs RGB/YUV422 -> YUV420 conversion).
-//
-// The RGB<->YUV integer coefficients (66/129/25, -38/-74/112, 112/-94/-18,
-// fixed-point scaled by 256) are the standard ITU-R BT.601 limited-range
-// *forward* matrix - the algebraic inverse of decoder/h264_rgb.h's
-// yuvToRgb8() (298/409/100/208/516), which was itself independently
-// re-derived and cross-checked against real ffmpeg output; round-trip
-// self-consistency (convert known RGB -> this file's YUV420 -> back
-// through yuvToRgb8()) and a real ffmpeg `-pix_fmt rgb24` -> `-pix_fmt
-// yuv420p` cross-check are this file's own verification (see
-// test/native/test_color_convert.cpp) rather than trusted from memory.
-//
-// Chroma is derived from a 2x2 (RGB888/666/565) or 1x2 (YUV422, already
-// horizontally subsampled) block average before the RGB->YUV matrix is
-// applied, not by subsampling a single corner pixel - cheap (a handful
-// of extra adds) and meaningfully reduces color aliasing at chroma
-// edges compared to picking one representative pixel.
+/*
+ * Header-only. Packed-pixel-format -> YUV 4:2:0 planar conversion, for
+ * encodeFrame*() callers whose source data isn't already three separate
+ * Y/U/V planes (e.g. a camera module's native YUV422/RGB565 output, or an
+ * RGB888/RGB666 framebuffer). This is the *forward* direction (encoder
+ * input) - the mirror image of decoder/h264_rgb.h's YUV->RGB output
+ * conversion, not a reuse of it (a genuinely different operation, so it
+ * lives in encoder/ rather than common/ - nothing on the decode side
+ * needs RGB/YUV422 -> YUV420 conversion).
+ *
+ * The RGB<->YUV integer coefficients (66/129/25, -38/-74/112, 112/-94/-18,
+ * fixed-point scaled by 256) are the standard ITU-R BT.601 limited-range
+ * *forward* matrix - the algebraic inverse of decoder/h264_rgb.h's
+ * yuvToRgb8() (298/409/100/208/516), which was itself independently
+ * re-derived and cross-checked against real ffmpeg output; round-trip
+ * self-consistency (convert known RGB -> this file's YUV420 -> back
+ * through yuvToRgb8()) and a real ffmpeg `-pix_fmt rgb24` -> `-pix_fmt
+ * yuv420p` cross-check are this file's own verification (see
+ * test/native/test_color_convert.cpp) rather than trusted from memory.
+ *
+ * Chroma is derived from a 2x2 (RGB888/666/565) or 1x2 (YUV422, already
+ * horizontally subsampled) block average before the RGB->YUV matrix is
+ * applied, not by subsampling a single corner pixel - cheap (a handful
+ * of extra adds) and meaningfully reduces color aliasing at chroma
+ * edges compared to picking one representative pixel.
+ */
 
 namespace tinyh264 {
 
@@ -41,13 +43,15 @@ inline void rgb8ToUv(int r, int g, int b, uint8_t* u, uint8_t* v) {
   *v = clip255(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
 }
 
-/// Converts an RGB888 (3 bytes/pixel, R/G/B order - matches decoder's
-/// toRGB888() convention) `width` x `height` image into YUV 4:2:0 planar,
-/// into caller-provided Y/U/V planes (never allocates). `rgbStride` is in
-/// bytes (>= width*3); `dstStrideY`/`dstStrideC` are the destination
-/// planes' own row strides. `width`/`height` need not be even for this
-/// function itself, but the encoder they feed requires multiples of 16 -
-/// see TinyH264Encoder::encodeIFrameRgb888().
+/**
+ * Converts an RGB888 (3 bytes/pixel, R/G/B order - matches decoder's
+ * toRGB888() convention) `width` x `height` image into YUV 4:2:0 planar,
+ * into caller-provided Y/U/V planes (never allocates). `rgbStride` is in
+ * bytes (>= width*3); `dstStrideY`/`dstStrideC` are the destination
+ * planes' own row strides. `width`/`height` need not be even for this
+ * function itself, but the encoder they feed requires multiples of 16 -
+ * see TinyH264Encoder::encodeFrameRgb888().
+ */
 inline void convertRgb888ToYuv420(const uint8_t* rgb, int rgbStride,
                                    int width, int height, uint8_t* dstY,
                                    int dstStrideY, uint8_t* dstU,
@@ -77,13 +81,15 @@ inline void convertRgb888ToYuv420(const uint8_t* rgb, int rgbStride,
   }
 }
 
-/// Converts an RGB666 (3 bytes/pixel, each byte's 6 significant bits
-/// left-justified in bits 7:2 - matches decoder's toRGB666() convention)
-/// image into YUV 4:2:0 planar. Each byte is expanded back to a full
-/// 8-bit value by replicating its top 6 bits into the 2 empty low bits
-/// (`(v & 0xFC) | (v >> 6)`, the standard bit-replication upscale - the
-/// same technique convertRgb565ToYuv420() uses for 5/6-bit channels)
-/// before applying the same matrix convertRgb888ToYuv420() uses.
+/**
+ * Converts an RGB666 (3 bytes/pixel, each byte's 6 significant bits
+ * left-justified in bits 7:2 - matches decoder's toRGB666() convention)
+ * image into YUV 4:2:0 planar. Each byte is expanded back to a full
+ * 8-bit value by replicating its top 6 bits into the 2 empty low bits
+ * (`(v & 0xFC) | (v >> 6)`, the standard bit-replication upscale - the
+ * same technique convertRgb565ToYuv420() uses for 5/6-bit channels)
+ * before applying the same matrix convertRgb888ToYuv420() uses.
+ */
 inline void convertRgb666ToYuv420(const uint8_t* rgb666, int rgbStride,
                                    int width, int height, uint8_t* dstY,
                                    int dstStrideY, uint8_t* dstU,
@@ -114,14 +120,16 @@ inline void convertRgb666ToYuv420(const uint8_t* rgb666, int rgbStride,
   }
 }
 
-/// Converts an RGB565 (uint16_t/pixel, 5-6-5 packed - matches decoder's
-/// toRGB565() convention: `(r&0xF8)<<8 | (g&0xFC)<<3 | b>>3`) image into
-/// YUV 4:2:0 planar. Each 5/6-bit channel is expanded to 8 bits by
-/// replicating its top bits into the low bits it doesn't have
-/// (`(v5<<3)|(v5>>2)` / `(v6<<2)|(v6>>4)` - the standard bit-replication
-/// upscale, which maps the channel's full 0..31/0..63 range evenly across
-/// 0..255 rather than leaving the low bits at 0). `rgbStride` is in
-/// uint16_t entries (>= width), not bytes.
+/**
+ * Converts an RGB565 (uint16_t/pixel, 5-6-5 packed - matches decoder's
+ * toRGB565() convention: `(r&0xF8)<<8 | (g&0xFC)<<3 | b>>3`) image into
+ * YUV 4:2:0 planar. Each 5/6-bit channel is expanded to 8 bits by
+ * replicating its top bits into the low bits it doesn't have
+ * (`(v5<<3)|(v5>>2)` / `(v6<<2)|(v6>>4)` - the standard bit-replication
+ * upscale, which maps the channel's full 0..31/0..63 range evenly across
+ * 0..255 rather than leaving the low bits at 0). `rgbStride` is in
+ * uint16_t entries (>= width), not bytes.
+ */
 inline void convertRgb565ToYuv420(const uint16_t* rgb565, int rgbStride,
                                    int width, int height, uint8_t* dstY,
                                    int dstStrideY, uint8_t* dstU,
@@ -164,14 +172,16 @@ inline void convertRgb565ToYuv420(const uint16_t* rgb565, int rgbStride,
   }
 }
 
-/// Converts a YUYV-order packed YUV 4:2:2 (Y0 U0 Y1 V0 per horizontal
-/// pixel pair - the common camera-module convention, e.g. OV2640/OV7670)
-/// image into YUV 4:2:0 planar. Luma is a direct copy (4:2:2 already has
-/// full-resolution luma); chroma is already horizontally subsampled the
-/// same way 4:2:0 needs (one U/V pair per 2 horizontal pixels) but has
-/// *full* vertical chroma resolution, so this function's only real work
-/// is averaging each vertically-adjacent row pair's U/V down to 4:2:0's
-/// halved vertical resolution. `yuyvStride` is in bytes (>= width*2).
+/**
+ * Converts a YUYV-order packed YUV 4:2:2 (Y0 U0 Y1 V0 per horizontal
+ * pixel pair - the common camera-module convention, e.g. OV2640/OV7670)
+ * image into YUV 4:2:0 planar. Luma is a direct copy (4:2:2 already has
+ * full-resolution luma); chroma is already horizontally subsampled the
+ * same way 4:2:0 needs (one U/V pair per 2 horizontal pixels) but has
+ * *full* vertical chroma resolution, so this function's only real work
+ * is averaging each vertically-adjacent row pair's U/V down to 4:2:0's
+ * halved vertical resolution. `yuyvStride` is in bytes (>= width*2).
+ */
 inline void convertYuyv422ToYuv420(const uint8_t* yuyv, int yuyvStride,
                                     int width, int height, uint8_t* dstY,
                                     int dstStrideY, uint8_t* dstU,

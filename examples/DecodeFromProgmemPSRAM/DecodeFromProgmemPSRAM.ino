@@ -1,19 +1,21 @@
-// TinyH264Decoder + PSRAM example: identical to DecodeFromProgmem, except
-// the decoder's picture buffers are allocated from PSRAM instead of the
-// regular heap, via PSRAMAllocatorESP32. Requires a board with PSRAM
-// (e.g. most ESP32-S3 modules) and PSRAM enabled in the board config -
-// on a plain ESP32 without PSRAM, use TinyH264Decoder<> (see
-// DecodeFromProgmem) instead.
-//
-// With PSRAM absorbing the two ~38KB picture buffers, H264_MAX_WIDTH/
-// H264_MAX_HEIGHT in h264_config.h can also be raised (e.g. to CIF or
-// QVGA) since they no longer compete with the rest of the sketch for
-// internal DRAM.
-//
-// Also benchmarks decode speed the same way DecodeFromProgmem does (see
-// its comments for the measurement methodology) - useful for comparing
-// PSRAM vs. regular-heap picture buffers' effect on decode time, since
-// PSRAM access is slower than internal DRAM on most ESP32 boards.
+/*
+ * TinyH264Decoder + PSRAM example: identical to DecodeFromProgmem, except
+ * the decoder's picture buffers are allocated from PSRAM instead of the
+ * regular heap, via PSRAMAllocatorESP32. Requires a board with PSRAM
+ * (e.g. most ESP32-S3 modules) and PSRAM enabled in the board config -
+ * on a plain ESP32 without PSRAM, use TinyH264Decoder<> (see
+ * DecodeFromProgmem) instead.
+ *
+ * With PSRAM absorbing the two ~38KB picture buffers, H264_MAX_WIDTH/
+ * H264_MAX_HEIGHT in h264_config.h can also be raised (e.g. to CIF or
+ * QVGA) since they no longer compete with the rest of the sketch for
+ * internal DRAM.
+ *
+ * Also benchmarks decode speed the same way DecodeFromProgmem does (see
+ * its comments for the measurement methodology) - useful for comparing
+ * PSRAM vs. regular-heap picture buffers' effect on decode time, since
+ * PSRAM access is slower than internal DRAM on most ESP32 boards.
+ */
 
 #include <TinyH264Decoder.h>
 #include "h264_test_clip.h"
@@ -23,15 +25,19 @@ using namespace tinyh264;
 TinyH264Decoder<PSRAMAllocatorESP32<uint8_t>> decoder;
 int frameCount = 0;
 
-// Decode the clip this many times back to back to get a stable timing
-// average instead of judging performance off the clip's 3 frames alone.
+/*
+ * Decode the clip this many times back to back to get a stable timing
+ * average instead of judging performance off the clip's 3 frames alone.
+ */
 static const int kBenchmarkReps = 30;
 
-// Wall-clock checkpoint, reset at the *end* of onFrame() (after the
-// luma-average/print work below, which is example-only overhead, not
-// decoder cost) so each measured frameUs reflects pure decode time - not
-// diluted by ~115200-baud UART transmission time for the previous frame's
-// print line.
+/*
+ * Wall-clock checkpoint, reset at the *end* of onFrame() (after the
+ * luma-average/print work below, which is example-only overhead, not
+ * decoder cost) so each measured frameUs reflects pure decode time - not
+ * diluted by ~115200-baud UART transmission time for the previous frame's
+ * print line.
+ */
 static uint32_t checkpointUs = 0;
 static uint64_t totalDecodeUs = 0;
 static uint32_t minFrameUs = 0xFFFFFFFF;
@@ -51,10 +57,12 @@ void onFrame(TinyH264Decoder<PSRAMAllocatorESP32<uint8_t>>& d, void* /*userData*
   uint32_t frameUs = micros() - checkpointUs;
   frameCount++;
 
-  // The very first frame overall also pays for one-time SPS/PPS parsing
-  // and the picture buffers' first (PSRAM) allocation, so it isn't
-  // representative of steady-state per-frame cost - excluded from the
-  // running stats, still printed below.
+  /*
+   * The very first frame overall also pays for one-time SPS/PPS parsing
+   * and the picture buffers' first (PSRAM) allocation, so it isn't
+   * representative of steady-state per-frame cost - excluded from the
+   * running stats, still printed below.
+   */
   if (frameCount > 1) {
     totalDecodeUs += frameUs;
     if (frameUs < minFrameUs) minFrameUs = frameUs;

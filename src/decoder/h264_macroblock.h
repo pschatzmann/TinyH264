@@ -13,25 +13,29 @@
 #include "../common/h264_tables.h"
 #include "../common/h264_transform.h"
 
-// Header-only. macroblock_layer() for I slices (I_4x4, I_16x16, I_PCM),
-// ITU-T H.264 clause 7.3.5, tying together CAVLC residual decoding,
-// dequant/inverse transform (h264_transform.h) and intra prediction
-// (h264_intra_pred.h) into full pixel reconstruction. P-slice macroblock
-// types (P_16x16/16x8/8x16/8x8, P_Skip) are handled by
-// h264_macroblock_inter.h, which shares the Intra decode path here for
-// the Intra-macroblock-inside-a-P-slice case.
-//
-// Everything here is templated on Allocator (the same parameter
-// TinyH264Decoder<Allocator> and Frame<Allocator> use) purely because it
-// all takes an MbDecodeContext<Allocator>, which holds Frame<Allocator>
-// pointers.
+/*
+ * Header-only. macroblock_layer() for I slices (I_4x4, I_16x16, I_PCM),
+ * ITU-T H.264 clause 7.3.5, tying together CAVLC residual decoding,
+ * dequant/inverse transform (h264_transform.h) and intra prediction
+ * (h264_intra_pred.h) into full pixel reconstruction. P-slice macroblock
+ * types (P_16x16/16x8/8x16/8x8, P_Skip) are handled by
+ * h264_macroblock_inter.h, which shares the Intra decode path here for
+ * the Intra-macroblock-inside-a-P-slice case.
+ *
+ * Everything here is templated on Allocator (the same parameter
+ * TinyH264Decoder<Allocator> and Frame<Allocator> use) purely because it
+ * all takes an MbDecodeContext<Allocator>, which holds Frame<Allocator>
+ * pointers.
+ */
 
 namespace tinyh264 {
 
-/// Outcome of decoding one macroblock's syntax: `ok` for a clean decode,
-/// `unsupported` for a recognized-but-unimplemented feature (result of
-/// `false` from the decode function itself, rather than this struct,
-/// signals an actual bitstream error).
+/**
+ * Outcome of decoding one macroblock's syntax: `ok` for a clean decode,
+ * `unsupported` for a recognized-but-unimplemented feature (result of
+ * `false` from the decode function itself, rather than this struct,
+ * signals an actual bitstream error).
+ */
 struct MacroblockDecodeResult {
   bool ok = false;
   bool unsupported = false;
@@ -47,13 +51,15 @@ struct MacroblockDecodeResult {
 template <typename Allocator>
 struct MbDecodeContext {
   Frame<Allocator>* frame;
-  // RefPicList0 for the current slice (clause 8.2.4): refList[0] is the
-  // most recently decoded reference picture, refList[numActiveRefs-1] the
-  // oldest - this decoder only implements the *default* list construction
-  // (no ref_pic_list_modification() reordering, which is flagged
-  // unsupported in h264_slice_header.h if present), so this is simply a
-  // window into Decoder::refFrames_. Unused (numActiveRefs == 0) for
-  // I-slices.
+  /*
+   * RefPicList0 for the current slice (clause 8.2.4): refList[0] is the
+   * most recently decoded reference picture, refList[numActiveRefs-1] the
+   * oldest - this decoder only implements the *default* list construction
+   * (no ref_pic_list_modification() reordering, which is flagged
+   * unsupported in h264_slice_header.h if present), so this is simply a
+   * window into Decoder::refFrames_. Unused (numActiveRefs == 0) for
+   * I-slices.
+   */
   const Frame<Allocator>* refList[H264_MAX_REF_FRAMES] = {nullptr};
   int numActiveRefs = 0;
   MbInfoTable* mbInfo;
@@ -63,9 +69,11 @@ struct MbDecodeContext {
   int mbX, mbY;
 };
 
-/// Decodes one 4x4 luma block's residual (full 16 coeffs incl. DC, I_4x4/
-/// Inter case - clause 8.5.9 dequant then 8.5.12.2 inverse transform) and
-/// adds it to the already-predicted pixels at the block's position.
+/**
+ * Decodes one 4x4 luma block's residual (full 16 coeffs incl. DC, I_4x4/
+ * Inter case - clause 8.5.9 dequant then 8.5.12.2 inverse transform) and
+ * adds it to the already-predicted pixels at the block's position.
+ */
 template <typename Allocator>
 inline bool decodeLumaBlockFull(BitReader& br, MbDecodeContext<Allocator>& ctx,
                                  int blkIdx, int qp) {
@@ -98,10 +106,12 @@ inline bool decodeLumaBlockFull(BitReader& br, MbDecodeContext<Allocator>& ctx,
   return true;
 }
 
-/// Decodes one 4x4 luma AC-only block (I_16x16 case, scan positions
-/// 1..15 - position 0 comes from the macroblock-wide DC block instead,
-/// clause 8.5.6) and adds it, using the given already Hadamard-transformed
-/// and dequantized DC value at raster position 0.
+/**
+ * Decodes one 4x4 luma AC-only block (I_16x16 case, scan positions
+ * 1..15 - position 0 comes from the macroblock-wide DC block instead,
+ * clause 8.5.6) and adds it, using the given already Hadamard-transformed
+ * and dequantized DC value at raster position 0.
+ */
 template <typename Allocator>
 inline bool decodeLumaBlockAc(BitReader& br, MbDecodeContext<Allocator>& ctx,
                                int blkIdx, int qp, int32_t dcValue) {
@@ -126,10 +136,12 @@ inline bool decodeLumaBlockAc(BitReader& br, MbDecodeContext<Allocator>& ctx,
   return true;
 }
 
-/// Decodes one chroma 4x4 AC-only block for the given plane (0=Cb,1=Cr) and
-/// sub-block position (cx,cy in 0..1), using the already Hadamard-
-/// transformed and dequantized chroma DC value at raster position 0
-/// (clause 8.5.11), and adds it on top of the already-predicted samples.
+/**
+ * Decodes one chroma 4x4 AC-only block for the given plane (0=Cb,1=Cr) and
+ * sub-block position (cx,cy in 0..1), using the already Hadamard-
+ * transformed and dequantized chroma DC value at raster position 0
+ * (clause 8.5.11), and adds it on top of the already-predicted samples.
+ */
 template <typename Allocator>
 inline bool decodeChromaBlockAc(BitReader& br, MbDecodeContext<Allocator>& ctx,
                                  int plane, int cx, int cy, int chromaQp,
@@ -157,35 +169,37 @@ inline bool decodeChromaBlockAc(BitReader& br, MbDecodeContext<Allocator>& ctx,
   return true;
 }
 
-/// Derives the predicted Intra_4x4 mode for luma block (bx,by) within the
-/// current macroblock, clause 8.3.1.1. Two distinct rules stack here, and
-/// conflating them is a natural (and silent) mistake:
-//  1. dcPredModePredictedFlag is a *joint* condition covering true
-//     unavailability (mbAddrA and/or mbAddrB doesn't exist - picture/slice
-//     edge - or, under constrained_intra_pred, is Inter-coded): if
-//     triggered by *either* side, BOTH intraMxMPredModeA and
-//     intraMxMPredModeB are forced to DC(2), not just the missing side.
-//  2. Only when that flag is 0 (both neighbors genuinely available) does
-//     each side *independently* fall back to DC(2) for the narrower
-//     reason of simply not being Intra_4x4/8x8-coded (e.g. a available
-//     I_16x16 neighbor) - that check does NOT feed back into the joint
-//     flag, and does NOT force the other side to DC too.
-// Getting this wrong (checking availability independently, or making the
-// "wrong type" check joint too) silently produces a locally-plausible but
-// spec-incorrect predicted mode - found by pixel-diffing whole decoded
-// frames against ffmpeg's reference decode; unit-level reasoning alone
-// couldn't distinguish these variants from the spec text.
-/// Decodes the remainder of macroblock_layer() (clause 7.3.5) given an
-/// already-known I-slice-numbered mb_type (0=I_NxN, 1..24=I_16x16
-/// variants, 25=I_PCM): prediction mode syntax, coded_block_pattern,
-/// mb_qp_delta, then full intra prediction + residual reconstruction for
-/// luma and chroma. Shared by decodeMacroblockIntra() (I-slice: reads
-/// mb_type itself) and the P-slice Inter path (h264_macroblock_inter.h),
-/// where mb_type >= 5 signals an Intra macroblock using this same
-/// numbering minus 5. `*qpY` is the running QP, read and updated in
-/// place; `result` reports unsupported-feature status (I_PCM with
-/// PPS transform_8x8_mode, an out-of-range mb_type, etc.) - an actual
-/// bitstream error is instead signaled by a `false` return.
+/**
+ * Derives the predicted Intra_4x4 mode for luma block (bx,by) within the
+ * current macroblock, clause 8.3.1.1. Two distinct rules stack here, and
+ * conflating them is a natural (and silent) mistake:
+ *  1. dcPredModePredictedFlag is a *joint* condition covering true
+ *     unavailability (mbAddrA and/or mbAddrB doesn't exist - picture/slice
+ *     edge - or, under constrained_intra_pred, is Inter-coded): if
+ *     triggered by *either* side, BOTH intraMxMPredModeA and
+ *     intraMxMPredModeB are forced to DC(2), not just the missing side.
+ *  2. Only when that flag is 0 (both neighbors genuinely available) does
+ *     each side *independently* fall back to DC(2) for the narrower
+ *     reason of simply not being Intra_4x4/8x8-coded (e.g. a available
+ *     I_16x16 neighbor) - that check does NOT feed back into the joint
+ *     flag, and does NOT force the other side to DC too.
+ * Getting this wrong (checking availability independently, or making the
+ * "wrong type" check joint too) silently produces a locally-plausible but
+ * spec-incorrect predicted mode - found by pixel-diffing whole decoded
+ * frames against ffmpeg's reference decode; unit-level reasoning alone
+ * couldn't distinguish these variants from the spec text.
+ * Decodes the remainder of macroblock_layer() (clause 7.3.5) given an
+ * already-known I-slice-numbered mb_type (0=I_NxN, 1..24=I_16x16
+ * variants, 25=I_PCM): prediction mode syntax, coded_block_pattern,
+ * mb_qp_delta, then full intra prediction + residual reconstruction for
+ * luma and chroma. Shared by decodeMacroblockIntra() (I-slice: reads
+ * mb_type itself) and the P-slice Inter path (h264_macroblock_inter.h),
+ * where mb_type >= 5 signals an Intra macroblock using this same
+ * numbering minus 5. `*qpY` is the running QP, read and updated in
+ * place; `result` reports unsupported-feature status (I_PCM with
+ * PPS transform_8x8_mode, an out-of-range mb_type, etc.) - an actual
+ * bitstream error is instead signaled by a `false` return.
+ */
 template <typename Allocator>
 inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocator>& ctx,
                                            uint32_t mbTypeRaw, int* qpY,
@@ -234,10 +248,12 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocat
   }
 
   if (!is16x16) {
-    // I_NxN. transform_size_8x8_flag would appear here if
-    // pps.transform8x8ModeFlag were set; a Baseline-profile encoder never
-    // sets it (see h264_sps_pps.h), so treat that combination as
-    // unsupported rather than silently mis-decoding 8x8-transform data.
+    /*
+     * I_NxN. transform_size_8x8_flag would appear here if
+     * pps.transform8x8ModeFlag were set; a Baseline-profile encoder never
+     * sets it (see h264_sps_pps.h), so treat that combination as
+     * unsupported rather than silently mis-decoding 8x8-transform data.
+     */
     if (ctx.pps->transform8x8ModeFlag) {
       result->unsupported = true;
       return true;
@@ -332,8 +348,10 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocat
       if (mb.cbpLuma != 0) {
         if (!decodeLumaBlockAc(br, ctx, blk, qp, dc)) return false;
       } else {
-        // No AC data coded: still need to add the (possibly nonzero) DC
-        // term to the prediction.
+        /*
+         * No AC data coded: still need to add the (possibly nonzero) DC
+         * term to the prediction.
+         */
         int32_t block[16] = {0};
         block[0] = dc;
         idct4x4(block);
@@ -412,11 +430,13 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocat
   return true;
 }
 
-/// I-slice entry point: reads mb_type itself (clause 7.3.5, the
-/// unconditional `mb_type` read that only happens directly like this in
-/// an I-slice - P-slices read it via the Inter path's own mb_type >= 5
-/// branch instead), then defers to decodeMacroblockIntraWithType() for
-/// everything else.
+/**
+ * I-slice entry point: reads mb_type itself (clause 7.3.5, the
+ * unconditional `mb_type` read that only happens directly like this in
+ * an I-slice - P-slices read it via the Inter path's own mb_type >= 5
+ * branch instead), then defers to decodeMacroblockIntraWithType() for
+ * everything else.
+ */
 template <typename Allocator>
 inline bool decodeMacroblockIntra(BitReader& br, MbDecodeContext<Allocator>& ctx,
                                    int* qpY, MacroblockDecodeResult* result) {

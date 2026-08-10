@@ -1,9 +1,11 @@
-// Desktop-only test: verifies TinyH264Decoder::toYUV420() (whole-frame
-// and windowed) packs exactly the same bytes y()/u()/v() already expose,
-// just concatenated into one tightly-packed buffer instead of three
-// plane pointers - no color-space math involved (unlike the RGB
-// converters), so this is checked for byte-exact equality, not a
-// tolerance.
+/*
+ * Desktop-only test: verifies TinyH264Decoder::toYUV420() (whole-frame
+ * and windowed) packs exactly the same bytes y()/u()/v() already expose,
+ * just concatenated into one tightly-packed buffer instead of three
+ * plane pointers - no color-space math involved (unlike the RGB
+ * converters), so this is checked for byte-exact equality, not a
+ * tolerance.
+ */
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -33,8 +35,10 @@ void onFrame(TinyH264Decoder<>& d, void*) {
   int w = d.width(), h = d.height();
   size_t needed = (size_t)w * h + 2 * (size_t)(w / 2) * (h / 2);
 
-  // Size-check behavior, same pattern as the RGB converters: returns the
-  // number of bytes written (== needed) on success, 0 on a too-small buffer.
+  /*
+   * Size-check behavior, same pattern as the RGB converters: returns the
+   * number of bytes written (== needed) on success, 0 on a too-small buffer.
+   */
   std::vector<uint8_t> buf(needed);
   if (d.toYUV420(buf.data(), needed) != needed) {
     printf("FAIL: exact-size buffer rejected\n");
@@ -45,8 +49,10 @@ void onFrame(TinyH264Decoder<>& d, void*) {
     failures++;
   }
 
-  // Byte-exact content check: reconstruct what toYUV420() *should* have
-  // produced directly from y()/u()/v(), and compare.
+  /*
+   * Byte-exact content check: reconstruct what toYUV420() *should* have
+   * produced directly from y()/u()/v(), and compare.
+   */
   size_t off = 0;
   for (int row = 0; row < h; row++) {
     for (int col = 0; col < w; col++) {
@@ -73,8 +79,10 @@ void onFrame(TinyH264Decoder<>& d, void*) {
     }
   }
 
-  // Windowed variant: tile content must match the corresponding
-  // sub-rectangle of the whole-frame packed buffer.
+  /*
+   * Windowed variant: tile content must match the corresponding
+   * sub-rectangle of the whole-frame packed buffer.
+   */
   int tx = 64, ty = 32, tdx = 32, tdy = 32;
   size_t tileNeeded = (size_t)tdx * tdy + 2 * (size_t)(tdx / 2) * (tdy / 2);
   std::vector<uint8_t> tile(tileNeeded);

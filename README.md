@@ -86,24 +86,24 @@ to lower the *runtime-active* reference count below the compile-time
 (each reference picture not needed saves ~38KB at QCIF).
 
 **Encoder**: two picture buffers - the current reconstruction and the
-single reference frame `encodePFrame()` motion-compensates against (see
+single reference frame P-frames motion-compensate against (see
 [Encoding](#encoding)) - each ~38KB, ~76KB total, both heap-allocated the
-first time `encodeIFrame()` is called (not counted in the static figures
+first time `encodeFrame()` is called (not counted in the static figures
 above). Both are allocated unconditionally on that first call, even for
-a caller that only ever does repeated `encodeIFrame()` calls and never
-`encodePFrame()` - a real, if modest, inefficiency in exchange for a
-simple "copy the just-finished picture into the reference slot" design
-rather than a more complex buffer-swapping scheme; ~38KB is the price of
-that simplicity for an I-frame-only use case. On top of the heap cost,
-the ~46KB static cost shown above (a slice scratch buffer, sized the
-same as the decoder's NAL scratch buffer, plus the same per-macroblock
-metadata table - unchanged by P-frame/rate-control support, both add
-only a handful of `int`/`bool` member fields). The `encodeIFrameRgb888()`/
-`encodeIFrameRgb666()`/`encodeIFrameRgb565()`/`encodeIFrameYuv422()`
-convenience overloads add ~38KB more, but only if actually called - their
-conversion scratch buffers are heap-allocated lazily on first use, so a
-sketch that only calls the plain `encodeIFrame()`/`encodePFrame()` never
-pays for them.
+a caller whose stream never actually produces a P-frame - a real, if
+modest, inefficiency in exchange for a simple "copy the just-finished
+picture into the reference slot" design rather than a more complex
+buffer-swapping scheme; ~38KB is the price of that simplicity for an
+I-frame-only use case. On top of the heap cost, the ~46KB static cost
+shown above (a slice scratch buffer, sized the same as the decoder's NAL
+scratch buffer, plus the same per-macroblock metadata table - unchanged
+by P-frame/rate-control support, both add only a handful of `int`/`bool`
+member fields). The `encodeFrameRgb888()`/`encodeFrameRgb666()`/
+`encodeFrameRgb565()`/`encodeFrameYuv422()` convenience overloads add
+~38KB more, but only if actually called - their conversion scratch
+buffers are heap-allocated lazily on first use (or eagerly via
+`begin(true)` - see below), so a sketch that only calls the plain
+`encodeFrame()` never pays for them.
 
 **Explicit lifecycle control**: both classes allocate lazily by default
 (as described above - first real encode/decode call), but both also
@@ -345,30 +345,34 @@ prediction is a poor match (scene cuts, occlusion, content entering/
 leaving the search range), and simple real-time-appropriate rate
 control.
 
-**`encodeFrame()` is the recommended entry point** - configure picture
-size/QP policy once, then call it once per picture, in order, and it
-decides I-frame vs. P-frame for you:
+**`encodeFrame()` is the only public encode entry point** - configure
+picture size/keyframe interval (via the constructor) and QP policy
+(via `setQp()`/`setTargetBitrate()`) once, then call `encodeFrame()`
+once per picture, in order, and it decides I-frame vs. P-frame for you.
+There's no explicit "encode an I-frame now" call - `encodeFrame()` is
+the whole API surface for driving the encoder, deliberately, so there's
+nothing to choose between and no width/height/stride/qp to repeat on
+every call:
 
 ```cpp
 #include <TinyH264Encoder.h>
 
 using namespace tinyh264;
 
-TinyH264Encoder<> encoder;
 uint8_t bitstream[16384];
 
-// Configure once, not on every call: width/height must each be a
-// multiple of 16 (no cropping support yet); qp is 0-51, lower = higher
-// quality/larger output.
-encoder.setSize(width, height);
-encoder.setQp(26);
+// width/height must each be a multiple of 16 (no cropping support yet);
+// the third argument is an optional periodic keyframe interval (a GOP
+// size - 0, the default, means "only re-key when unavoidable": no
+// reference yet, or a resolution change).
+TinyH264Encoder<> encoder(width, height, /*keyframeInterval=*/0);
+encoder.setQp(26);  // 0-51, lower = higher quality/larger output
 
 for (...) {
   // One call per picture, in order - the first call (and any call after
-  // setSize() changes width/height) becomes a self-contained I-frame
-  // (SPS + PPS + IDR slice); every other call becomes a motion-
-  // compensated P-frame against the previous picture (just the P-slice,
-  // no SPS/PPS resent).
+  // width/height change) becomes a self-contained I-frame (SPS + PPS +
+  // IDR slice); every other call becomes a motion-compensated P-frame
+  // against the previous picture (just the P-slice, no SPS/PPS resent).
   size_t n = encoder.encodeFrame(y, u, v, bitstream, sizeof(bitstream));
   if (n == 0) {
     // buffer too small, or width/height not a multiple of 16
@@ -380,38 +384,27 @@ for (...) {
 }
 ```
 
-`setStride(strideY, strideC)` overrides the Y/C plane row strides this
-5-argument `encodeFrame()` uses (they otherwise default to tightly
-packed - `strideY == width`, `strideC == width/2` - the common case for
-a camera/framebuffer with no row padding); `setPackedStride(stride)` is
-the equivalent for the RGB/YUV422 overloads below. A 10-argument
-`encodeFrame(y, strideY, u, v, strideC, width, height, qp, dst,
-dstCapacity)` overload (identical to the one shown above in earlier
-versions of this README) is still available if you'd rather pass
-everything explicitly on every call instead - e.g. genuinely varying
-dimensions, or a QP that changes frame to frame without going through
-rate control.
+If width/height/keyframe interval aren't known at construction time,
+`setSize(width, height)`/`setKeyframeInterval(frames)` set them
+afterward instead - the constructor is purely a convenience wrapper
+around those two setters (`TinyH264Encoder<> encoder;` with no
+arguments still works, matching this class's behavior before the
+constructor existed; `setSize()` must then be called before the first
+`encodeFrame()` call). `setStride(strideY, strideC)` overrides the Y/C
+plane row strides `encodeFrame()` uses (they otherwise default to
+tightly packed - `strideY == width`, `strideC == width/2` - the common
+case for a camera/framebuffer with no row padding); `setPackedStride(stride)`
+is the equivalent for the RGB/YUV422 overloads below.
 
-Call `encoder.setKeyframeInterval(frames)` to also insert a periodic
-keyframe automatically (a GOP size, in the standard sense - keyframes
-land at picture 0, `frames`, `2*frames`, ...), useful for stream
-resilience or letting a decoder join mid-stream; it's off by default
-(`encodeFrame()` still always re-keys on the two cases that are never
-optional - no reference yet, or a resolution change).
-
-The lower-level `encodeIFrame()`/`encodePFrame()` that `encodeFrame()`
-is built from are still available if you want explicit control over
-exactly when a keyframe happens instead:
-
-```cpp
-// Starts the sequence explicitly (SPS+PPS+IDR).
-size_t n = encoder.encodeIFrame(y, strideY, u, v, strideC,
-                                 width, height, /*qp=*/26,
-                                 bitstream, sizeof(bitstream));
-// Every following frame, until you want another keyframe:
-size_t n2 = encoder.encodePFrame(y2, strideY, u2, v2, strideC,
-                                  /*qp=*/26, bitstream, sizeof(bitstream));
-```
+`setKeyframeInterval(frames)` (or the constructor's third argument)
+inserts a periodic keyframe automatically (a GOP size, in the standard
+sense - keyframes land at picture 0, `frames`, `2*frames`, ...), useful
+for stream resilience or letting a decoder join mid-stream; it's off by
+default (`encodeFrame()` still always re-keys on the two cases that are
+never optional - no reference yet, or a resolution change). There is
+deliberately no way to force a keyframe on a specific call beyond that -
+a resolution change (`setSize()` with a new width/height) is the only
+other trigger.
 
 I_16x16-vs-I_4x4, Inter-vs-Skip, and (within a P-slice) Inter-vs-Intra
 mode decisions are all automatic (no separate call needed) - every
@@ -432,19 +425,18 @@ heuristics - see each decision function's own comment
 exact thresholds and why they're not empirically tuned against a rate-
 distortion curve.
 
-**Rate control**: pass `qp = -1` (to either `encodeIFrame()` or
-`encodePFrame()`) after calling `setTargetBitrate()` to let the encoder
-pick its own QP each frame, adapted toward a target bitrate instead of a
-fixed QP:
+**Rate control**: call `setTargetBitrate()` and leave `qp` at its
+default (or call `setQp(-1)` explicitly - same sentinel meaning) to let
+the encoder pick its own QP each frame, adapted toward a target bitrate
+instead of a fixed QP:
 
 ```cpp
 encoder.setTargetBitrate(300000, /*fps=*/25.0);  // ~300kbps at 25fps
+encoder.setQp(-1);  // rate control (also the default if setQp() is never called)
 
-size_t n = encoder.encodeIFrame(y, strideY, u, v, strideC, width, height,
-                                 /*qp=*/-1, bitstream, sizeof(bitstream));
-// ... later, for each subsequent frame:
-size_t n2 = encoder.encodePFrame(y2, strideY, u2, v2, strideC, /*qp=*/-1,
-                                  bitstream, sizeof(bitstream));
+for (...) {
+  size_t n = encoder.encodeFrame(y, u, v, bitstream, sizeof(bitstream));
+}
 
 encoder.lastQp();  // what QP the most recent call actually used
 ```
@@ -466,25 +458,22 @@ demonstrate.
 
 For source data that isn't already three separate Y/U/V planes,
 `encodeFrameRgb888()`/`encodeFrameRgb666()`/`encodeFrameRgb565()`/
-`encodeFrameYuv422()` (and, for explicit I/P control, the lower-level
-`encodeIFrameRgb888()`/`encodeIFrameRgb666()`/`encodeIFrameRgb565()`/
-`encodeIFrameYuv422()` plus their `encodePFrameRgb*()` counterparts)
-take the same parameters as `encodeFrame()`/`encodeIFrame()`/
-`encodePFrame()` with one packed-pixel source buffer/stride instead -
-useful when a camera module or framebuffer already produces RGB or
-packed YUV 4:2:2 rather than planar YUV 4:2:0:
+`encodeFrameYuv422()` take a single packed-pixel source buffer instead
+(same automatic I/P dispatch and setSize()/setQp()/setPackedStride()
+configuration as `encodeFrame()`) - useful when a camera module or
+framebuffer already produces RGB or packed YUV 4:2:2 rather than planar
+YUV 4:2:0:
 
 ```cpp
 // RGB888: 3 bytes/pixel, R/G/B order (matches TinyH264Decoder::toRGB888()).
-encoder.encodeIFrameRgb888(rgb, width * 3, width, height, 26, bitstream, sizeof(bitstream));
+encoder.encodeFrameRgb888(rgb, bitstream, sizeof(bitstream));
 
-// RGB565: uint16_t/pixel, 5-6-5 packed (matches toRGB565()). Stride is in
-// uint16_t entries, not bytes.
-encoder.encodeIFrameRgb565(rgb565, width, width, height, 26, bitstream, sizeof(bitstream));
+// RGB565: uint16_t/pixel, 5-6-5 packed (matches toRGB565()).
+encoder.encodeFrameRgb565(rgb565, bitstream, sizeof(bitstream));
 
 // YUYV-order packed YUV 4:2:2 (Y0 U0 Y1 V0 per pixel pair) - the common
 // camera-module convention (e.g. OV2640/OV7670 output).
-encoder.encodeIFrameYuv422(yuyv, width * 2, width, height, 26, bitstream, sizeof(bitstream));
+encoder.encodeFrameYuv422(yuyv, bitstream, sizeof(bitstream));
 ```
 
 These convert internally to YUV 4:2:0 (see `src/encoder/h264_color_convert.h`)
@@ -499,8 +488,8 @@ rgb24 -> -pix_fmt yuv420p` conversion of a real image
 top of the plain YUV-planes path is well under 1 dB PSNR. The RGB/YUV422
 conversion scratch buffers are allocated lazily on first use of one of
 these RGB/YUV422 methods (matching `Frame`'s own allocate-on-first-use
-convention) - calling only the plain `encodeFrame()`/`encodeIFrame()`/
-`encodePFrame()` never pays for them.
+convention, or eagerly via `begin(true)` - see "Memory budget" above) -
+calling only the plain `encodeFrame()` never pays for them.
 
 Verified round-trip against real `ffmpeg` decode: I-frames bit-exact at
 QP 18 and above across the whole QP range 0-51, within +/-1 (a handful
@@ -519,10 +508,10 @@ compensated) prediction on top of spatial coding.
 
 See `examples/EncodeSyntheticFrame/` for a complete, self-contained
 sketch (a synthetic gradient test pattern that shifts a little each
-frame, giving encodePFrame() genuine motion to compensate - no camera/
-SD/network needed) demonstrating encodeIFrame(), encodePFrame(), and
-rate control together, that runs on any ESP32/RP2040 board as a smoke
-test.
+frame, giving P-frames genuine motion to compensate - no camera/
+SD/network needed) demonstrating the constructor, `encodeFrame()`,
+periodic keyframes, and rate control together, that runs on any
+ESP32/RP2040 board as a smoke test.
 
 ## Preparing input with ffmpeg
 

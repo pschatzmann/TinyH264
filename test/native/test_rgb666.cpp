@@ -1,13 +1,15 @@
-// Desktop-only test: verifies h264_rgb.h's RGB666 conversion by
-// self-consistency against RGB888, rather than an external oracle -
-// ffmpeg has no raw 18-bit-per-pixel pixel format to cross-check against
-// (unlike RGB565's rgb565le and RGB888's rgb24, both verified elsewhere
-// against real ffmpeg output). Both RGB666 and RGB888 are computed from
-// the exact same yuvToRgb8() values (see h264_rgb.h); RGB666 is defined
-// as that 8-bit value with its bottom 2 bits cleared (left-justified in
-// bits 7:2), so every RGB666 output byte must equal the corresponding
-// RGB888 output byte with `& 0xFC` applied - checked here for every byte
-// of a real decoded frame, exactly, not just approximately.
+/*
+ * Desktop-only test: verifies h264_rgb.h's RGB666 conversion by
+ * self-consistency against RGB888, rather than an external oracle -
+ * ffmpeg has no raw 18-bit-per-pixel pixel format to cross-check against
+ * (unlike RGB565's rgb565le and RGB888's rgb24, both verified elsewhere
+ * against real ffmpeg output). Both RGB666 and RGB888 are computed from
+ * the exact same yuvToRgb8() values (see h264_rgb.h); RGB666 is defined
+ * as that 8-bit value with its bottom 2 bits cleared (left-justified in
+ * bits 7:2), so every RGB666 output byte must equal the corresponding
+ * RGB888 output byte with `& 0xFC` applied - checked here for every byte
+ * of a real decoded frame, exactly, not just approximately.
+ */
 #include <cstdio>
 #include <cstdlib>
 #include <vector>

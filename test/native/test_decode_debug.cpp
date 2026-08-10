@@ -1,15 +1,17 @@
-// Diagnostic variant of test_decode_iframe.cpp with extra DUMP_MB / DUMP_MB_CHROMA /
-// DUMP_MB_LIST / DUMP_MB_LIST_CHROMA compile-time hooks (see #ifdef blocks below)
-// for investigating the known chroma-DC bug documented in h264_macroblock.h.
-// Build against qcif_nodbf.264 (deblocking disabled, to isolate CAVLC/transform
-// bugs from deblocking) - see assets/.
-// Desktop-only test: decode the first (IDR) frame of the real QCIF
-// baseline/CAVLC stream with the actual TinyH264 decoder pipeline, and
-// compare it pixel-for-pixel against ffmpeg's own decode of the same
-// frame (assets/qcif_nodbf_frame0_ref.yuv, raw yuv420p). This is the real oracle for
-// everything built so far: CAVLC tables, macroblock layer, intra
-// prediction, and dequant/transform all have to be correct simultaneously
-// for this to match.
+/*
+ * Diagnostic variant of test_decode_iframe.cpp with extra DUMP_MB / DUMP_MB_CHROMA /
+ * DUMP_MB_LIST / DUMP_MB_LIST_CHROMA compile-time hooks (see #ifdef blocks below)
+ * for investigating the known chroma-DC bug documented in h264_macroblock.h.
+ * Build against qcif_nodbf.264 (deblocking disabled, to isolate CAVLC/transform
+ * bugs from deblocking) - see assets/.
+ * Desktop-only test: decode the first (IDR) frame of the real QCIF
+ * baseline/CAVLC stream with the actual TinyH264 decoder pipeline, and
+ * compare it pixel-for-pixel against ffmpeg's own decode of the same
+ * frame (assets/qcif_nodbf_frame0_ref.yuv, raw yuv420p). This is the real oracle for
+ * everything built so far: CAVLC tables, macroblock layer, intra
+ * prediction, and dequant/transform all have to be correct simultaneously
+ * for this to match.
+ */
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>

@@ -5,25 +5,29 @@
 #include "h264_nal.h"
 #include "h264_sps_pps.h"
 
-// Header-only: slice_header() parsing, spec clause 7.3.3. Only I and P
-// slices are supported (B/SP/SI are flagged unsupported). Up to
-// H264_MAX_REF_FRAMES reference pictures are supported (see
-// h264_config.h/Decoder::setMaxRefFrames()), but only the *default*
-// reference picture list construction (clause 8.2.4.2) and *sliding
-// window* reference marking (clause 8.2.5.3) - ref_pic_list_modification()
-// (explicit reordering) and adaptive_ref_pic_marking_mode (MMCO-based
-// marking) are both fully parsed (to keep the bitstream in sync for the
-// fields that follow) but flagged unsupported if actually present, rather
-// than implementing their full semantics.
+/*
+ * Header-only: slice_header() parsing, spec clause 7.3.3. Only I and P
+ * slices are supported (B/SP/SI are flagged unsupported). Up to
+ * H264_MAX_REF_FRAMES reference pictures are supported (see
+ * h264_config.h/Decoder::setMaxRefFrames()), but only the *default*
+ * reference picture list construction (clause 8.2.4.2) and *sliding
+ * window* reference marking (clause 8.2.5.3) - ref_pic_list_modification()
+ * (explicit reordering) and adaptive_ref_pic_marking_mode (MMCO-based
+ * marking) are both fully parsed (to keep the bitstream in sync for the
+ * fields that follow) but flagged unsupported if actually present, rather
+ * than implementing their full semantics.
+ */
 
 namespace tinyh264 {
 
-/// slice_type % 5 (clause 7.4.3, Table 7-6): the wire value can also be
-/// offset by +5 to additionally signal "all other slices in this picture
-/// have the same type" (handled by taking `% 5` when parsing, see
-/// SliceHeader::sliceType). Only kSliceI and kSliceP are actually
-/// supported - B/SP/SI slices are parsed far enough to flag
-/// SliceHeader::unsupported but never decoded.
+/**
+ * slice_type % 5 (clause 7.4.3, Table 7-6): the wire value can also be
+ * offset by +5 to additionally signal "all other slices in this picture
+ * have the same type" (handled by taking `% 5` when parsing, see
+ * SliceHeader::sliceType). Only kSliceI and kSliceP are actually
+ * supported - B/SP/SI slices are parsed far enough to flag
+ * SliceHeader::unsupported but never decoded.
+ */
 enum SliceTypeBase {
   kSliceP = 0,
   kSliceB = 1,
@@ -32,9 +36,11 @@ enum SliceTypeBase {
   kSliceSI = 4,
 };
 
-/// Parsed slice_header() (clause 7.3.3) plus the fields it computes with
-/// help from the active SPS/PPS (e.g. sliceQp). Fully re-parsed for every
-/// slice NAL - nothing here is cached across slices/pictures.
+/**
+ * Parsed slice_header() (clause 7.3.3) plus the fields it computes with
+ * help from the active SPS/PPS (e.g. sliceQp). Fully re-parsed for every
+ * slice NAL - nothing here is cached across slices/pictures.
+ */
 struct SliceHeader {
   bool valid = false;
   bool unsupported = false;
@@ -71,14 +77,16 @@ struct SliceHeader {
   int32_t sliceBetaOffsetDiv2 = 0;
 };
 
-/// Consumes ref_pic_list_modification() (clause 7.3.3.1) for list 0 only
-/// (no B-slice list 1, since B-slices are unsupported). The parsed
-/// modification operations themselves are discarded - explicit reference
-/// list reordering isn't implemented (see parseSliceHeader(), which flags
-/// `refPicListModificationFlagL0 == true` as unsupported) - but the syntax
-/// must still be consumed to keep the bit reader in sync with what
-/// follows even in that unsupported case. Returns false on a bitstream
-/// error.
+/**
+ * Consumes ref_pic_list_modification() (clause 7.3.3.1) for list 0 only
+ * (no B-slice list 1, since B-slices are unsupported). The parsed
+ * modification operations themselves are discarded - explicit reference
+ * list reordering isn't implemented (see parseSliceHeader(), which flags
+ * `refPicListModificationFlagL0 == true` as unsupported) - but the syntax
+ * must still be consumed to keep the bit reader in sync with what
+ * follows even in that unsupported case. Returns false on a bitstream
+ * error.
+ */
 inline bool parseRefPicListModificationL0(BitReader& br, SliceHeader* sh) {
   sh->refPicListModificationFlagL0 = br.flag();
   if (sh->refPicListModificationFlagL0) {
@@ -97,17 +105,19 @@ inline bool parseRefPicListModificationL0(BitReader& br, SliceHeader* sh) {
   return true;
 }
 
-/// Consumes dec_ref_pic_marking() (clause 7.3.3.3). `sh->isIdr` selects the
-/// IDR vs. non-IDR syntax. Adaptive (MMCO-based) reference marking isn't
-/// implemented - only the *default sliding window* process (clause
-/// 8.2.5.3) is (see Decoder::decodeSlice()) - so the individual MMCO
-/// operations are parsed (to stay in sync with the bitstream) but
-/// discarded; parseSliceHeader() flags `adaptiveRefPicMarkingModeFlag ==
-/// true` as unsupported. The one exception recorded here regardless is
-/// whether MMCO op 5 ("reset frame numbering") appeared
-/// (SliceHeader::memoryManagementControlOp5); currently unused by the
-/// decoder (picture order count isn't tracked), kept parsed/flagged for
-/// forward compatibility. Returns false on a bitstream error.
+/**
+ * Consumes dec_ref_pic_marking() (clause 7.3.3.3). `sh->isIdr` selects the
+ * IDR vs. non-IDR syntax. Adaptive (MMCO-based) reference marking isn't
+ * implemented - only the *default sliding window* process (clause
+ * 8.2.5.3) is (see Decoder::decodeSlice()) - so the individual MMCO
+ * operations are parsed (to stay in sync with the bitstream) but
+ * discarded; parseSliceHeader() flags `adaptiveRefPicMarkingModeFlag ==
+ * true` as unsupported. The one exception recorded here regardless is
+ * whether MMCO op 5 ("reset frame numbering") appeared
+ * (SliceHeader::memoryManagementControlOp5); currently unused by the
+ * decoder (picture order count isn't tracked), kept parsed/flagged for
+ * forward compatibility. Returns false on a bitstream error.
+ */
 inline bool parseDecRefPicMarking(BitReader& br, SliceHeader* sh) {
   if (sh->isIdr) {
     sh->noOutputOfPriorPicsFlag = br.flag();
@@ -135,18 +145,20 @@ inline bool parseDecRefPicMarking(BitReader& br, SliceHeader* sh) {
   return true;
 }
 
-/// Parses slice_header() (clause 7.3.3) from `br` into `sh`, given the
-/// already-decoded `nal` header and the SPS/PPS the slice's pic_parameter_
-/// set_id refers to (looked up by the caller before calling this - the
-/// slice's own ppsId is re-read here for completeness but not used to
-/// look anything up). Sets `sh->unsupported` (returning true, not false)
-/// for any recognized-but-unimplemented feature (B/SP/SI slice types,
-/// weighted prediction, explicit reference list reordering, adaptive
-/// reference marking, etc.) so the caller can skip the picture cleanly;
-/// returns false only on an actual bitstream/syntax error (ran out of
-/// data mid-parse). The active reference count is validated by the caller
-/// against the runtime-configurable maxRefFrames (Decoder::decodeSlice()),
-/// not here - this function only parses the bitstream.
+/**
+ * Parses slice_header() (clause 7.3.3) from `br` into `sh`, given the
+ * already-decoded `nal` header and the SPS/PPS the slice's pic_parameter_
+ * set_id refers to (looked up by the caller before calling this - the
+ * slice's own ppsId is re-read here for completeness but not used to
+ * look anything up). Sets `sh->unsupported` (returning true, not false)
+ * for any recognized-but-unimplemented feature (B/SP/SI slice types,
+ * weighted prediction, explicit reference list reordering, adaptive
+ * reference marking, etc.) so the caller can skip the picture cleanly;
+ * returns false only on an actual bitstream/syntax error (ran out of
+ * data mid-parse). The active reference count is validated by the caller
+ * against the runtime-configurable maxRefFrames (Decoder::decodeSlice()),
+ * not here - this function only parses the bitstream.
+ */
 inline bool parseSliceHeader(BitReader& br, const NalUnit& nal, const Sps& sps,
                               const Pps& pps, SliceHeader* sh) {
   *sh = SliceHeader();
@@ -160,8 +172,10 @@ inline bool parseSliceHeader(BitReader& br, const NalUnit& nal, const Sps& sps,
   uint32_t frameNumBits = sps.log2MaxFrameNumMinus4 + 4;
   sh->frameNum = br.u((int)frameNumBits);
 
-  // field_pic_flag / bottom_field_flag are never present: parseSps() already
-  // flags frame_mbs_only_flag == 0 streams as unsupported before we get here.
+  /*
+   * field_pic_flag / bottom_field_flag are never present: parseSps() already
+   * flags frame_mbs_only_flag == 0 streams as unsupported before we get here.
+   */
 
   if (sh->isIdr) {
     sh->idrPicId = br.ue();
@@ -199,9 +213,11 @@ inline bool parseSliceHeader(BitReader& br, const NalUnit& nal, const Sps& sps,
       return true;
     }
     if (sh->refPicListModificationFlagL0) {
-      // Explicit reference list reordering: parsed above (to stay in sync
-      // with the bitstream) but not implemented - see
-      // parseRefPicListModificationL0()'s comment.
+      /*
+       * Explicit reference list reordering: parsed above (to stay in sync
+       * with the bitstream) but not implemented - see
+       * parseRefPicListModificationL0()'s comment.
+       */
       sh->unsupported = true;
       return true;
     }
@@ -209,10 +225,12 @@ inline bool parseSliceHeader(BitReader& br, const NalUnit& nal, const Sps& sps,
 
   if (pps.weightedPredFlag &&
       (sh->sliceType == kSliceP || sh->sliceType == kSliceSP)) {
-    // Explicit weighted prediction is a Main/High-profile feature; a
-    // Baseline-conformant encoder never sets weighted_pred_flag. Rather
-    // than implement pred_weight_table() parsing for a syntax element we
-    // can't apply anyway, flag the slice unsupported now.
+    /*
+     * Explicit weighted prediction is a Main/High-profile feature; a
+     * Baseline-conformant encoder never sets weighted_pred_flag. Rather
+     * than implement pred_weight_table() parsing for a syntax element we
+     * can't apply anyway, flag the slice unsupported now.
+     */
     sh->unsupported = true;
     return true;
   }
@@ -223,10 +241,12 @@ inline bool parseSliceHeader(BitReader& br, const NalUnit& nal, const Sps& sps,
       return true;
     }
     if (sh->adaptiveRefPicMarkingModeFlag) {
-      // Adaptive (MMCO-based) reference marking: parsed above (to stay in
-      // sync with the bitstream) but not implemented - only the default
-      // sliding window process is (see parseDecRefPicMarking()'s comment
-      // and Decoder::decodeSlice()).
+      /*
+       * Adaptive (MMCO-based) reference marking: parsed above (to stay in
+       * sync with the bitstream) but not implemented - only the default
+       * sliding window process is (see parseDecRefPicMarking()'s comment
+       * and Decoder::decodeSlice()).
+       */
       sh->unsupported = true;
       return true;
     }

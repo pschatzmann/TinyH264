@@ -1,31 +1,32 @@
-// Desktop-only test: verifies the Encoder/Decoder begin()/end() lifecycle
-// methods (encoder/h264_encoder.h's Encoder::begin()/end(), decoder/
-// h264_decoder.h's Decoder::begin()/end(), and their TinyH264Encoder/
-// TinyH264Decoder public-API wrappers). Uses the internal Encoder<>/
-// Decoder<> classes directly (not the TinyH264*<> wrappers) since this
-// test needs to inspect frame().data.empty() to confirm memory was
-// actually freed/reserved, which the public wrappers don't expose.
-//
-// Checks, against a real 10-frame QCIF motion sequence
-// (assets/all_frames_ref.yuv, the same oracle test_encode_pframe.cpp/
-// test_encode_autoframe.cpp use):
-// 1. begin() eagerly allocates frame_/refFrame_ (frame().data non-empty
-//    before any encode call) - unlike the default lazy behavior, where
-//    frame().data stays empty until the first encodeIFrame()/
-//    encodeFrame() call.
-// 2. Calling begin() (with or without a prior encode) doesn't change the
-//    encoded bitstream - it's purely an eager-allocation/state-reset
-//    hook, not a new code path - by encoding the same 10-frame sequence
-//    with and without a preceding begin() call and diffing the output
-//    byte-for-byte.
-// 3. end() actually frees the memory (frame().data.empty() afterward).
-// 4. end() then begin() + re-encoding the same sequence from scratch
-//    produces byte-identical output to a fresh, never-used Encoder -
-//    i.e. end() really resets stream state, not just memory.
-// 5. The decoder side: begin() eagerly allocates curFrame_, end() frees
-//    it, and a decoder that's been end()'d can begin()/decode the same
-//    stream again from scratch with identical results (frame count, no
-//    errors) to a fresh Decoder.
+/*
+ * Desktop-only test: verifies the Encoder/Decoder begin()/end() lifecycle
+ * methods (encoder/h264_encoder.h's Encoder::begin()/end(), decoder/
+ * h264_decoder.h's Decoder::begin()/end(), and their TinyH264Encoder/
+ * TinyH264Decoder public-API wrappers). Uses the internal Encoder<>/
+ * Decoder<> classes directly (not the TinyH264*<> wrappers) since this
+ * test needs to inspect frame().data.empty() to confirm memory was
+ * actually freed/reserved, which the public wrappers don't expose.
+ *
+ * Checks, against a real 10-frame QCIF motion sequence
+ * (assets/all_frames_ref.yuv, the same oracle test_encode_pframe.cpp/
+ * test_encode_autoframe.cpp use):
+ * 1. begin() eagerly allocates frame_/refFrame_ (frame().data non-empty
+ *    before any encode call) - unlike the default lazy behavior, where
+ *    frame().data stays empty until the first encodeFrame() call.
+ * 2. Calling begin() (with or without a prior encode) doesn't change the
+ *    encoded bitstream - it's purely an eager-allocation/state-reset
+ *    hook, not a new code path - by encoding the same 10-frame sequence
+ *    with and without a preceding begin() call and diffing the output
+ *    byte-for-byte.
+ * 3. end() actually frees the memory (frame().data.empty() afterward).
+ * 4. end() then begin() + re-encoding the same sequence from scratch
+ *    produces byte-identical output to a fresh, never-used Encoder -
+ *    i.e. end() really resets stream state, not just memory.
+ * 5. The decoder side: begin() eagerly allocates curFrame_, end() frees
+ *    it, and a decoder that's been end()'d can begin()/decode the same
+ *    stream again from scratch with identical results (frame count, no
+ *    errors) to a fresh Decoder.
+ */
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

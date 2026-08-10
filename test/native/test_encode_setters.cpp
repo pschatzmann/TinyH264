@@ -1,27 +1,29 @@
-// Desktop-only test: verifies the Encoder/TinyH264Encoder setSize()/
-// setStride()/setPackedStride()/setQp() setters that back encodeFrame()
-// and its color-format overloads (encoder/h264_encoder.h) - the only
-// public encode entry points now (encodeIFrame()/encodePFrame() and all
-// explicit-width/height/stride/qp overloads were removed once every
-// caller had a setter-based replacement).
-//
-// Checks, against a real 10-frame QCIF motion sequence
-// (assets/all_frames_ref.yuv, the same oracle test_encode_pframe.cpp/
-// test_encode_autoframe.cpp/test_lifecycle.cpp use):
-// 1. setSize() takes effect identically whether called before or after
-//    begin() (begin() deliberately doesn't reset width_/height_ - see
-//    its own comment) - encoding the same sequence both ways produces
-//    byte-identical output.
-// 2. setPackedStride() actually takes effect for encodeFrameRgb888() -
-//    encoding a deliberately padded RGB888 buffer via the override
-//    matches encoding the same content unpadded with the default stride.
-// 3. setStride() actually takes effect for the plain-YUV encodeFrame() -
-//    same idea as check 2, for a deliberately padded Y/C buffer.
-// 4. The Encoder(width, height, keyframeInterval) constructor produces
-//    byte-identical output to a default-constructed Encoder with
-//    setSize()/setKeyframeInterval() called separately afterward -
-//    pinning down that the constructor is purely a convenience wrapper
-//    around those two setters, not a new code path.
+/*
+ * Desktop-only test: verifies the Encoder/TinyH264Encoder setSize()/
+ * setStride()/setPackedStride()/setQp() setters that back encodeFrame()
+ * and its color-format overloads (encoder/h264_encoder.h) - the only
+ * public encode entry points now (encodeIFrame()/encodePFrame() and all
+ * explicit-width/height/stride/qp overloads were removed once every
+ * caller had a setter-based replacement).
+ *
+ * Checks, against a real 10-frame QCIF motion sequence
+ * (assets/all_frames_ref.yuv, the same oracle test_encode_pframe.cpp/
+ * test_encode_autoframe.cpp/test_lifecycle.cpp use):
+ * 1. setSize() takes effect identically whether called before or after
+ *    begin() (begin() deliberately doesn't reset width_/height_ - see
+ *    its own comment) - encoding the same sequence both ways produces
+ *    byte-identical output.
+ * 2. setPackedStride() actually takes effect for encodeFrameRgb888() -
+ *    encoding a deliberately padded RGB888 buffer via the override
+ *    matches encoding the same content unpadded with the default stride.
+ * 3. setStride() actually takes effect for the plain-YUV encodeFrame() -
+ *    same idea as check 2, for a deliberately padded Y/C buffer.
+ * 4. The Encoder(width, height, keyframeInterval) constructor produces
+ *    byte-identical output to a default-constructed Encoder with
+ *    setSize()/setKeyframeInterval() called separately afterward -
+ *    pinning down that the constructor is purely a convenience wrapper
+ *    around those two setters, not a new code path.
+ */
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -113,9 +115,11 @@ int main() {
       printf("FAIL: unexpected frame0_rgb24.raw size %zu\n", rgb.size());
       failures++;
     } else {
-      // Deliberately padded copy: rgbStride = W*3 + 48 bytes, extra
-      // columns filled with garbage that must never be read if the
-      // stride override works correctly.
+      /*
+       * Deliberately padded copy: rgbStride = W*3 + 48 bytes, extra
+       * columns filled with garbage that must never be read if the
+       * stride override works correctly.
+       */
       const int padStride = W * 3 + 48;
       std::vector<uint8_t> padded((size_t)padStride * H, 0xAA);
       for (int y = 0; y < H; y++) {
@@ -152,9 +156,11 @@ int main() {
 
   // --- 3. setStride() override actually takes effect (plain YUV) ---
   {
-    // Deliberately padded copy of frame 0: strideY = W + 32, strideC =
-    // W/2 + 16, extra columns filled with garbage that must never be
-    // read if the stride override works correctly.
+    /*
+     * Deliberately padded copy of frame 0: strideY = W + 32, strideC =
+     * W/2 + 16, extra columns filled with garbage that must never be
+     * read if the stride override works correctly.
+     */
     const int padStrideY = W + 32, padStrideC = W / 2 + 16;
     std::vector<uint8_t> paddedY((size_t)padStrideY * H, 0xAA);
     std::vector<uint8_t> paddedU((size_t)padStrideC * (H / 2), 0xAA);

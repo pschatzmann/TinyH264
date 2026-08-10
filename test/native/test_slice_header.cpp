@@ -1,6 +1,8 @@
-// Desktop-only test: parse slice headers from the real QCIF baseline/CAVLC
-// stream and sanity-check them (first slice of each frame starts at MB 0,
-// IDR NAL -> slice_type I, non-IDR NAL -> slice_type P, QP in a sane range).
+/*
+ * Desktop-only test: parse slice headers from the real QCIF baseline/CAVLC
+ * stream and sanity-check them (first slice of each frame starts at MB 0,
+ * IDR NAL -> slice_type I, non-IDR NAL -> slice_type P, QP in a sane range).
+ */
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>

@@ -7,16 +7,18 @@
 #include "h264_sps_pps.h"
 #include "../common/h264_transform.h"
 
-// Header-only. In-loop deblocking filter, ITU-T H.264 clause 8.7. Table
-// values (alpha/beta/tC0) cross-checked against FFmpeg's
-// libavcodec/h264_loopfilter.c rather than transcribed from memory (same
-// rationale as h264_cavlc_tables.h / h264_tables.h).
-//
-// Boundary-strength derivation (8.7.2.1) covers all of Baseline's cases:
-// bS 4 (macroblock-boundary edges) / 3 (internal edges) whenever either
-// side is Intra-coded, bS 2 when either side has coded residual, and bS 1
-// (motion vector difference >= 4 quarter-samples) / 0 (identical motion,
-// no filtering) for Inter/P_Skip macroblocks - see boundaryStrength().
+/*
+ * Header-only. In-loop deblocking filter, ITU-T H.264 clause 8.7. Table
+ * values (alpha/beta/tC0) cross-checked against FFmpeg's
+ * libavcodec/h264_loopfilter.c rather than transcribed from memory (same
+ * rationale as h264_cavlc_tables.h / h264_tables.h).
+ *
+ * Boundary-strength derivation (8.7.2.1) covers all of Baseline's cases:
+ * bS 4 (macroblock-boundary edges) / 3 (internal edges) whenever either
+ * side is Intra-coded, bS 2 when either side has coded residual, and bS 1
+ * (motion vector difference >= 4 quarter-samples) / 0 (identical motion,
+ * no filtering) for Inter/P_Skip macroblocks - see boundaryStrength().
+ */
 
 namespace tinyh264 {
 
@@ -34,9 +36,11 @@ static const uint8_t kDeblockBeta[52] = {
     9,  9,  10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 16, 16,
     17, 17, 18, 18,
 };
-/// tC0 (Table 8-17), indexed [indexA][bS], bS 0..3 (bS==0 never used - no
-/// filtering at all; bS==4 uses the separate "strong" filter below, not
-/// this table).
+/**
+ * tC0 (Table 8-17), indexed [indexA][bS], bS 0..3 (bS==0 never used - no
+ * filtering at all; bS==4 uses the separate "strong" filter below, not
+ * this table).
+ */
 static const int8_t kDeblockTc0[52][4] = {
     {-1, 0, 0, 0}, {-1, 0, 0, 0}, {-1, 0, 0, 0}, {-1, 0, 0, 0},
     {-1, 0, 0, 0}, {-1, 0, 0, 0}, {-1, 0, 0, 0}, {-1, 0, 0, 0},
@@ -53,17 +57,21 @@ static const int8_t kDeblockTc0[52][4] = {
     {-1, 9, 12, 18}, {-1, 10, 13, 20}, {-1, 11, 15, 23}, {-1, 13, 17, 25},
 };
 
-/// Clip3(lo, hi, v) as defined by clause 5.8, used throughout the filter
-/// for both index/threshold clamping and sample-delta clamping.
+/**
+ * Clip3(lo, hi, v) as defined by clause 5.8, used throughout the filter
+ * for both index/threshold clamping and sample-delta clamping.
+ */
 inline int clip3(int lo, int hi, int v) { return v < lo ? lo : (v > hi ? hi : v); }
 
-/// Filters one line of luma samples at consecutive `step` offsets from
-/// `pix` (pix[-1*step]=p0, pix[0]=q0), clause 8.7.2.3 (bS<4, "Filtering
-/// process for edges with bS less than 4") and 8.7.2.4 (bS==4, the
-/// stronger "Filtering process for edges with bS equal to 4"). Gets the
-/// full p1/p2 adjustments that filterEdgeChroma() below does not, since
-/// only luma evaluates the ap/aq conditions for extending the filter to a
-/// second sample on each side.
+/**
+ * Filters one line of luma samples at consecutive `step` offsets from
+ * `pix` (pix[-1*step]=p0, pix[0]=q0), clause 8.7.2.3 (bS<4, "Filtering
+ * process for edges with bS less than 4") and 8.7.2.4 (bS==4, the
+ * stronger "Filtering process for edges with bS equal to 4"). Gets the
+ * full p1/p2 adjustments that filterEdgeChroma() below does not, since
+ * only luma evaluates the ap/aq conditions for extending the filter to a
+ * second sample on each side.
+ */
 inline void filterEdgeLuma(uint8_t* pix, int step, int bS, int alpha,
                             int beta, int tc0) {
   int p0 = pix[-1 * step], p1 = pix[-2 * step], p2 = pix[-3 * step];
@@ -113,11 +121,13 @@ inline void filterEdgeLuma(uint8_t* pix, int step, int bS, int alpha,
   }
 }
 
-/// Filters one line of chroma samples (one plane, Cb or Cr) at consecutive
-/// `step` offsets from `pix`, clause 8.7.2.3/8.7.2.4's chromaEdgeFlag==1
-/// case: only p0/q0 are ever modified (chroma has no p1/p2 "ap/aq"
-/// strong-filter extension), and the bS==4 case always uses the simple
-/// two-tap average rather than luma's 3-sample "strong" filter.
+/**
+ * Filters one line of chroma samples (one plane, Cb or Cr) at consecutive
+ * `step` offsets from `pix`, clause 8.7.2.3/8.7.2.4's chromaEdgeFlag==1
+ * case: only p0/q0 are ever modified (chroma has no p1/p2 "ap/aq"
+ * strong-filter extension), and the bS==4 case always uses the simple
+ * two-tap average rather than luma's 3-sample "strong" filter.
+ */
 inline void filterEdgeChroma(uint8_t* pix, int step, int bS, int alpha,
                               int beta, int tc0) {
   int p0 = pix[-1 * step], p1 = pix[-2 * step];
@@ -136,20 +146,22 @@ inline void filterEdgeChroma(uint8_t* pix, int step, int bS, int alpha,
   }
 }
 
-/// Boundary strength (bS) between two 4x4 luma blocks p (before the edge)
-/// and q (after it), clause 8.7.2.1: 4/3 (isMbEdge picks which) if either
-/// side is Intra, else 2 if either side has coded residual (nnz > 0), else
-/// 1 if the two sides use different reference pictures OR their motion
-/// vectors differ by >= 4 quarter-samples in either component, else 0 (no
-/// filtering). Comparing refIdx values directly (rather than the actual
-/// referenced picture identity) is exact, not an approximation, given this
-/// decoder's other simplifications: ref_pic_list_modification() reordering
-/// is rejected as unsupported (h264_slice_header.h), so within one
-/// picture refIdx N always maps to the same stored reference picture
-/// across every slice of that picture - reference lists only change at
-/// picture boundaries. Reused verbatim for the co-located chroma edge (see
-/// deblockPicture()'s chroma section) since clause 8.7.2.1 derives bS from
-/// luma properties even when the filter being applied is chroma's.
+/**
+ * Boundary strength (bS) between two 4x4 luma blocks p (before the edge)
+ * and q (after it), clause 8.7.2.1: 4/3 (isMbEdge picks which) if either
+ * side is Intra, else 2 if either side has coded residual (nnz > 0), else
+ * 1 if the two sides use different reference pictures OR their motion
+ * vectors differ by >= 4 quarter-samples in either component, else 0 (no
+ * filtering). Comparing refIdx values directly (rather than the actual
+ * referenced picture identity) is exact, not an approximation, given this
+ * decoder's other simplifications: ref_pic_list_modification() reordering
+ * is rejected as unsupported (h264_slice_header.h), so within one
+ * picture refIdx N always maps to the same stored reference picture
+ * across every slice of that picture - reference lists only change at
+ * picture boundaries. Reused verbatim for the co-located chroma edge (see
+ * deblockPicture()'s chroma section) since clause 8.7.2.1 derives bS from
+ * luma properties even when the filter being applied is chroma's.
+ */
 inline int boundaryStrength(const MacroblockInfo& p, int pBlk,
                              const MacroblockInfo& q, int qBlk,
                              bool isMbEdge) {
@@ -163,13 +175,15 @@ inline int boundaryStrength(const MacroblockInfo& p, int pBlk,
   return (dx >= 4 || dy >= 4) ? 1 : 0;
 }
 
-/// Whether the macroblock-boundary edge between `mb` (at mbX,mbY) and its
-/// neighbor (at neighborX,neighborY) should be filtered at all, per clause
-/// 8.7's disable_deblocking_filter_idc handling: 0 = filter normally, 1 =
-/// never filter this MB's edges (caller skips this whole macroblock before
-/// even calling this function - see deblockPicture()), 2 = filter internal
-/// edges but skip the MB boundary specifically when the neighbor is in a
-/// different slice.
+/**
+ * Whether the macroblock-boundary edge between `mb` (at mbX,mbY) and its
+ * neighbor (at neighborX,neighborY) should be filtered at all, per clause
+ * 8.7's disable_deblocking_filter_idc handling: 0 = filter normally, 1 =
+ * never filter this MB's edges (caller skips this whole macroblock before
+ * even calling this function - see deblockPicture()), 2 = filter internal
+ * edges but skip the MB boundary specifically when the neighbor is in a
+ * different slice.
+ */
 inline bool mbEdgeFilterable(const MacroblockInfo& mb, uint8_t mbSliceId,
                               const MbInfoTable& mbInfo, int neighborX,
                               int neighborY) {
@@ -180,16 +194,18 @@ inline bool mbEdgeFilterable(const MacroblockInfo& mb, uint8_t mbSliceId,
   return true;
 }
 
-/// Filters an entire picture in place (clause 8.7's outer loop: every
-/// macroblock in raster order, each MB's left then top edges - vertical
-/// edges before horizontal, per spec - luma before chroma). Must run
-/// after all slices of the picture have been fully reconstructed
-/// (deblocking reads/writes across macroblock boundaries, so
-/// partially-decoded neighbors would corrupt the result); called once per
-/// completed picture from Decoder::decodeSlice(). `mbInfo` supplies both
-/// the per-macroblock coding state (mb_type, nnz, mv, qpY) boundaryStrength()
-/// needs and the per-slice bookkeeping mbEdgeFilterable() needs for
-/// disable_deblocking_filter_idc == 2.
+/**
+ * Filters an entire picture in place (clause 8.7's outer loop: every
+ * macroblock in raster order, each MB's left then top edges - vertical
+ * edges before horizontal, per spec - luma before chroma). Must run
+ * after all slices of the picture have been fully reconstructed
+ * (deblocking reads/writes across macroblock boundaries, so
+ * partially-decoded neighbors would corrupt the result); called once per
+ * completed picture from Decoder::decodeSlice(). `mbInfo` supplies both
+ * the per-macroblock coding state (mb_type, nnz, mv, qpY) boundaryStrength()
+ * needs and the per-slice bookkeeping mbEdgeFilterable() needs for
+ * disable_deblocking_filter_idc == 2.
+ */
 template <typename Allocator>
 inline void deblockPicture(Frame<Allocator>& frame, MbInfoTable& mbInfo,
                             const Pps& pps) {
@@ -215,10 +231,12 @@ inline void deblockPicture(Frame<Allocator>& frame, MbInfoTable& mbInfo,
 
       int px0 = mbX * 16, py0 = mbY * 16;
 
-      // --- Luma vertical edges (step=1 across the row); bS is computed
-      //     per 4x4 *row group* (not once for the whole 16px edge) since
-      //     Inter macroblocks can have different coefficients/motion per
-      //     4x4 block along the same edge. --------------------------------
+      /*
+       * --- Luma vertical edges (step=1 across the row); bS is computed
+       *     per 4x4 *row group* (not once for the whole 16px edge) since
+       *     Inter macroblocks can have different coefficients/motion per
+       *     4x4 block along the same edge. --------------------------------
+       */
       for (int edge = 0; edge < 4; edge++) {
         bool isMbEdge = (edge == 0);
         if (isMbEdge && !leftEdgeOk) continue;
@@ -268,17 +286,19 @@ inline void deblockPicture(Frame<Allocator>& frame, MbInfoTable& mbInfo,
         }
       }
 
-      // --- Chroma: MB-boundary edge + one internal edge per direction
-      //     (4:2:0, 4x4 chroma transform blocks in an 8x8 area). Reuses
-      //     the bS computed from the co-located *luma* block pair (clause
-      //     8.7.2.1 defines bS from luma properties even when filtering
-      //     chroma). Chroma MB height/width (8) is exactly half luma's
-      //     (16), so each of the 4 luma groups along an edge (bS[0..3],
-      //     4 luma rows/cols each) maps 1:1 to a 2-sample chroma segment -
-      //     *all four* bS values are used, not just every other one (see
-      //     FFmpeg's h264_loop_filter_chroma: 4 groups x inner_iters=2).
-      //     Uses the chroma QP (cqp), averaged with the neighbor's chroma
-      //     QP.
+      /*
+       * --- Chroma: MB-boundary edge + one internal edge per direction
+       *     (4:2:0, 4x4 chroma transform blocks in an 8x8 area). Reuses
+       *     the bS computed from the co-located *luma* block pair (clause
+       *     8.7.2.1 defines bS from luma properties even when filtering
+       *     chroma). Chroma MB height/width (8) is exactly half luma's
+       *     (16), so each of the 4 luma groups along an edge (bS[0..3],
+       *     4 luma rows/cols each) maps 1:1 to a 2-sample chroma segment -
+       *     *all four* bS values are used, not just every other one (see
+       *     FFmpeg's h264_loop_filter_chroma: 4 groups x inner_iters=2).
+       *     Uses the chroma QP (cqp), averaged with the neighbor's chroma
+       *     QP.
+       */
       int cpx0 = mbX * 8, cpy0 = mbY * 8;
       for (int edge = 0; edge < 2; edge++) {
         bool isMbEdge = (edge == 0);

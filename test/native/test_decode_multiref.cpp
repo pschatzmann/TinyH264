@@ -1,14 +1,16 @@
-// Desktop-only test: decode all 40 frames (1 IDR + 39 P) of a QCIF
-// baseline/CAVLC stream encoded with -x264-params ref=3 (multiple
-// reference frames genuinely exercised - confirmed via a debug build
-// showing refIdx 0/1/2 all used across real macroblocks, not just refIdx
-// 0 coincidentally every time), and compare each pixel-for-pixel against
-// ffmpeg's own decode. This is the oracle for the multi-reference-frame
-// feature: ref_idx_l0 parsing (te(v)), the sliding-window reference
-// picture list, ref_idx-aware MV prediction, and ref_idx-aware
-// deblocking boundary strength all have to be correct simultaneously for
-// this to match - see h264_decoder.h/h264_macroblock_inter.h/
-// h264_deblock.h.
+/*
+ * Desktop-only test: decode all 40 frames (1 IDR + 39 P) of a QCIF
+ * baseline/CAVLC stream encoded with -x264-params ref=3 (multiple
+ * reference frames genuinely exercised - confirmed via a debug build
+ * showing refIdx 0/1/2 all used across real macroblocks, not just refIdx
+ * 0 coincidentally every time), and compare each pixel-for-pixel against
+ * ffmpeg's own decode. This is the oracle for the multi-reference-frame
+ * feature: ref_idx_l0 parsing (te(v)), the sliding-window reference
+ * picture list, ref_idx-aware MV prediction, and ref_idx-aware
+ * deblocking boundary strength all have to be correct simultaneously for
+ * this to match - see h264_decoder.h/h264_macroblock_inter.h/
+ * h264_deblock.h.
+ */
 #include <cstdio>
 #include <cstdlib>
 #include <vector>

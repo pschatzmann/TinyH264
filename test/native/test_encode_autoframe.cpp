@@ -1,18 +1,20 @@
-// Desktop-only test: verifies TinyH264Encoder::encodeFrame() (the only
-// public encode entry point - automatic I/P dispatch, encoder/
-// h264_encoder.h's Encoder::encodeFrame()/needsKeyframe()) against a
-// real 10-frame QCIF motion sequence (assets/all_frames_ref.yuv, the
-// same oracle test_encode_pframe.cpp uses). Checks:
-// 1. Encoding the whole sequence via encodeFrame() produces exactly one
-//    IDR (picture 0, no reference yet) followed by numFrames-1 non-IDR
-//    P-slices - checked by real NAL type, not by guessing from encoded
-//    size - and the whole stream self-decodes without error.
-// 2. setKeyframeInterval() lands keyframes at *exactly* the right
-//    picture indices (GOP-size semantics: interval N -> keyframes at
-//    0, N, 2N, ... - not N+1, an off-by-one this project's own
-//    development caught by testing this exact scenario) - checked by
-//    NAL type, not by guessing from encoded size.
-// 3. The keyframe-interval-encoded stream still decodes cleanly.
+/*
+ * Desktop-only test: verifies TinyH264Encoder::encodeFrame() (the only
+ * public encode entry point - automatic I/P dispatch, encoder/
+ * h264_encoder.h's Encoder::encodeFrame()/needsKeyframe()) against a
+ * real 10-frame QCIF motion sequence (assets/all_frames_ref.yuv, the
+ * same oracle test_encode_pframe.cpp uses). Checks:
+ * 1. Encoding the whole sequence via encodeFrame() produces exactly one
+ *    IDR (picture 0, no reference yet) followed by numFrames-1 non-IDR
+ *    P-slices - checked by real NAL type, not by guessing from encoded
+ *    size - and the whole stream self-decodes without error.
+ * 2. setKeyframeInterval() lands keyframes at *exactly* the right
+ *    picture indices (GOP-size semantics: interval N -> keyframes at
+ *    0, N, 2N, ... - not N+1, an off-by-one this project's own
+ *    development caught by testing this exact scenario) - checked by
+ *    NAL type, not by guessing from encoded size.
+ * 3. The keyframe-interval-encoded stream still decodes cleanly.
+ */
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -41,18 +43,22 @@ static const int W = 176, H = 144;
 static const size_t FRAME_SIZE = (size_t)W * H * 3 / 2;
 int failures = 0;
 
-/// True if `nalPayload` (the byte right after a 4-byte Annex-B start
-/// code) is a kNalSliceIdr (5) NAL - i.e. this picture is a real
-/// keyframe, not just "encoded a lot of bytes" (which a busy P-frame
-/// could also do, an unreliable proxy this test deliberately avoids).
+/**
+ * True if `nalPayload` (the byte right after a 4-byte Annex-B start
+ * code) is a kNalSliceIdr (5) NAL - i.e. this picture is a real
+ * keyframe, not just "encoded a lot of bytes" (which a busy P-frame
+ * could also do, an unreliable proxy this test deliberately avoids).
+ */
 bool isIdrNal(const uint8_t* nalPayload) {
   return (nalPayload[0] & 0x1F) == kNalSliceIdr;
 }
 
-/// Scans a multi-NAL Annex-B buffer and returns the byte offset of the
-/// Nth VCL (slice) NAL's start code - SPS/PPS NALs are skipped, so
-/// index 0 is always the first picture's slice, index 1 the second
-/// picture's, etc., regardless of how many SPS/PPS NALs preceded it.
+/**
+ * Scans a multi-NAL Annex-B buffer and returns the byte offset of the
+ * Nth VCL (slice) NAL's start code - SPS/PPS NALs are skipped, so
+ * index 0 is always the first picture's slice, index 1 the second
+ * picture's, etc., regardless of how many SPS/PPS NALs preceded it.
+ */
 size_t findNthSliceNal(const std::vector<uint8_t>& bs, int n) {
   int seen = -1;
   for (size_t i = 0; i + 4 < bs.size(); i++) {

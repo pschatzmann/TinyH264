@@ -1,11 +1,13 @@
-// Desktop-only sanity check: every CAVLC VLC table must be a valid prefix
-// code (no codeword is a prefix of another) and, since these are the
-// standard's canonical complete codes, the Kraft sum over valid entries
-// should equal exactly 1. This won't catch a table entry that's "wrong but
-// still a valid code" against the spec, but it will catch transcription
-// slips (flipped bit, wrong length) that break the prefix-code structure -
-// independent of the real oracle (pixel-exact decode vs ffmpeg) which comes
-// once the full pipeline exists.
+/*
+ * Desktop-only sanity check: every CAVLC VLC table must be a valid prefix
+ * code (no codeword is a prefix of another) and, since these are the
+ * standard's canonical complete codes, the Kraft sum over valid entries
+ * should equal exactly 1. This won't catch a table entry that's "wrong but
+ * still a valid code" against the spec, but it will catch transcription
+ * slips (flipped bit, wrong length) that break the prefix-code structure -
+ * independent of the real oracle (pixel-exact decode vs ffmpeg) which comes
+ * once the full pipeline exists.
+ */
 #include <cassert>
 #include <cstdio>
 #include "../../src/common/h264_cavlc_tables.h"
@@ -48,8 +50,10 @@ static bool checkTable(const char* name, const uint8_t* lens,
   if (expectComplete && kraft < 1.0 - 1e-9) {
     printf("%s: kraft sum %.6f < 1 (incomplete code - missing entries?)\n",
            name, kraft);
-    // Not necessarily a bug for tables with intentionally-unused slots
-    // (padding for alignment) but worth flagging for manual review.
+    /*
+     * Not necessarily a bug for tables with intentionally-unused slots
+     * (padding for alignment) but worth flagging for manual review.
+     */
   }
   return ok;
 }
@@ -61,10 +65,12 @@ int main() {
   char name[64];
   for (int t = 0; t < 4; t++) {
     snprintf(name, sizeof(name), "coeff_token[table %d]", t);
-    // Table 3 (nC>=8) is a closed-form FLC, not meant to be a compact
-    // prefix code (it deliberately has many equal-length codewords), so
-    // don't expect Kraft==1 there in the "complete VLC" sense - it's
-    // already complete by construction (64 six-bit codes).
+    /*
+     * Table 3 (nC>=8) is a closed-form FLC, not meant to be a compact
+     * prefix code (it deliberately has many equal-length codewords), so
+     * don't expect Kraft==1 there in the "complete VLC" sense - it's
+     * already complete by construction (64 six-bit codes).
+     */
     ok &= checkTable(name, kCoeffTokenLen[t], kCoeffTokenBits[t], 4 * 17,
                       t != 3);
   }

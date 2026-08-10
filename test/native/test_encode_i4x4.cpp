@@ -1,28 +1,30 @@
-// Desktop-only test: verifies the I_16x16-vs-I_4x4 macroblock mode
-// decision (shouldUseIntra4x4(), h264_macroblock_encode.h) both
-// round-trips correctly and actually improves compression - not just
-// "doesn't crash." Encodes the same real QCIF frame
-// (assets/frame0_ref.yuv, the oracle the other encode/decode tests
-// share) at several QPs, twice: once with I_4x4 selection enabled (the
-// real, default encodeIFrame() path) and once with it forced off (a
-// thin local reimplementation of Encoder::encodeIFrame()'s macroblock
-// loop that always calls encodeMacroblockIntra16x16() - see
-// encodeAlwaysI16x16() below), and checks that enabling I_4x4:
-// 1. Still decodes correctly via this project's own TinyH264Decoder
-//    (bit-exact against the encoder's own reconstruction, the same bar
-//    test_encode_iframe.cpp holds the I_16x16-only path to).
-// 2. Produces a smaller or equal-sized bitstream at every tested QP -
-//    the concrete, measurable reason to have I_4x4 at all. Not just
-//    "PSNR is fine": a mode-decision bug that always picks I_16x16
-//    would also pass a bit-exactness check trivially, so this is the
-//    test that actually exercises the decision logic.
-//
-// Development-time cross-check (not re-run here): the same comparison
-// was also run against real ffmpeg's decode, confirming a real PSNR
-// improvement (1-2.8dB) at every QP alongside the smaller file sizes,
-// and bit-exactness at QP 18+ (matching the I_16x16-only path's own
-// verified QP range) - see h264_macroblock_encode.h's own comments for
-// the mode-decision heuristic this validates.
+/*
+ * Desktop-only test: verifies the I_16x16-vs-I_4x4 macroblock mode
+ * decision (shouldUseIntra4x4(), h264_macroblock_encode.h) both
+ * round-trips correctly and actually improves compression - not just
+ * "doesn't crash." Encodes the same real QCIF frame
+ * (assets/frame0_ref.yuv, the oracle the other encode/decode tests
+ * share) at several QPs, twice: once with I_4x4 selection enabled (the
+ * real, default encodeIFrame() path) and once with it forced off (a
+ * thin local reimplementation of Encoder::encodeIFrame()'s macroblock
+ * loop that always calls encodeMacroblockIntra16x16() - see
+ * encodeAlwaysI16x16() below), and checks that enabling I_4x4:
+ * 1. Still decodes correctly via this project's own TinyH264Decoder
+ *    (bit-exact against the encoder's own reconstruction, the same bar
+ *    test_encode_iframe.cpp holds the I_16x16-only path to).
+ * 2. Produces a smaller or equal-sized bitstream at every tested QP -
+ *    the concrete, measurable reason to have I_4x4 at all. Not just
+ *    "PSNR is fine": a mode-decision bug that always picks I_16x16
+ *    would also pass a bit-exactness check trivially, so this is the
+ *    test that actually exercises the decision logic.
+ *
+ * Development-time cross-check (not re-run here): the same comparison
+ * was also run against real ffmpeg's decode, confirming a real PSNR
+ * improvement (1-2.8dB) at every QP alongside the smaller file sizes,
+ * and bit-exactness at QP 18+ (matching the I_16x16-only path's own
+ * verified QP range) - see h264_macroblock_encode.h's own comments for
+ * the mode-decision heuristic this validates.
+ */
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -51,11 +53,13 @@ static std::vector<uint8_t> readFile(const char* path) {
 int failures = 0;
 static const int W = 176, H = 144;
 
-/// Thin reimplementation of Encoder::encodeIFrame()'s macroblock loop
-/// with the mode decision hardwired to always choose I_16x16 - this
-/// test's baseline for "no I_4x4 at all", so bytes-produced can be
-/// compared apples-to-apples against the real encodeIFrame() (which
-/// makes the real per-macroblock choice) at the same QP.
+/**
+ * Thin reimplementation of Encoder::encodeIFrame()'s macroblock loop
+ * with the mode decision hardwired to always choose I_16x16 - this
+ * test's baseline for "no I_4x4 at all", so bytes-produced can be
+ * compared apples-to-apples against the real encodeIFrame() (which
+ * makes the real per-macroblock choice) at the same QP.
+ */
 size_t encodeAlwaysI16x16(const uint8_t* srcY, int srcStrideY,
                            const uint8_t* srcU, const uint8_t* srcV,
                            int srcStrideC, int width, int height, int qp,
@@ -130,8 +134,10 @@ void testAtQp(const std::vector<uint8_t>& yuv, int qp) {
   std::vector<uint8_t> bsMixed(200000);
   enc.setSize(W, H);
   enc.setQp(qp);
-  // Fresh encoder, no reference yet - encodeFrame() encodes this as an
-  // I-frame automatically (the only public encode entry point now).
+  /*
+   * Fresh encoder, no reference yet - encodeFrame() encodes this as an
+   * I-frame automatically (the only public encode entry point now).
+   */
   size_t nMixed =
       enc.encodeFrame(srcY, srcU, srcV, bsMixed.data(), bsMixed.size());
   if (nMixed == 0) {
