@@ -17,11 +17,11 @@
  */
 
 #ifndef H264_MAX_WIDTH
-#define H264_MAX_WIDTH 176
+#define H264_MAX_WIDTH 320
 #endif
 
 #ifndef H264_MAX_HEIGHT
-#define H264_MAX_HEIGHT 144
+#define H264_MAX_HEIGHT 240
 #endif
 
 /*
