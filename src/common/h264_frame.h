@@ -11,21 +11,29 @@
  * H264_MAX_WIDTH x H264_MAX_HEIGHT; see h264_config.h for the memory
  * budget this implies.
  *
- * Y, U, and V live in *one* std::vector<uint8_t, Allocator> (contiguous,
- * standard "I420" layout: Y bytes, then U bytes, then V bytes) rather
- * than three separate vectors - one allocator call per Frame instead of
- * three, and the whole picture is one contiguous block (useful for bulk
- * copies/DMA). y()/u()/v() below return offset pointers into that single
- * buffer; nothing outside this struct needs to know it isn't three
- * separate allocations. A fixed-size array isn't used instead: a Decoder
- * holds several Frames (current + up to H264_MAX_REF_FRAMES references),
- * and on a plain ESP32 those as *static* struct members overflow the
- * DRAM .bss segment before anything else in the sketch even gets a
- * chance to run - confirmed by actually compiling the example against
- * esp32:esp32 with arduino-cli, not just by the theoretical budget math
- * in h264_config.h. The Allocator template parameter (propagated from
+ * Y, U, and V live in *three separate* std::vector<uint8_t, Allocator>
+ * buffers rather than one merged contiguous allocation. A merged buffer
+ * was tried first (one allocator call per Frame, whole picture DMA/bulk-
+ * copy friendly), but at larger resolutions (e.g. QVGA, 115200 bytes for
+ * one frame) that single allocation can exceed the *largest available
+ * contiguous block* on a plain ESP32 even when total free heap would be
+ * enough - heap fragmentation from WiFi/BT and other subsystems limits
+ * the biggest single malloc, not just the running total. Splitting into
+ * 3 smaller allocations (luma 76800 bytes, each chroma plane 19200 bytes
+ * at QVGA) makes each individually much more likely to fit a fragmented
+ * heap's largest block, at the cost of losing the single-contiguous-
+ * buffer property. y()/u()/v() below return pointers into whichever of
+ * the three buffers is relevant; nothing outside this struct needs to
+ * know how many allocations back it. A fixed-size array isn't used
+ * instead: a Decoder holds several Frames (current + up to
+ * H264_MAX_REF_FRAMES references), and on a plain ESP32 those as
+ * *static* struct members overflow the DRAM .bss segment before
+ * anything else in the sketch even gets a chance to run - confirmed by
+ * actually compiling the example against esp32:esp32 with arduino-cli,
+ * not just by the theoretical budget math in h264_config.h. The
+ * Allocator template parameter (propagated from
  * TinyH264Decoder<Allocator>, default std::allocator<uint8_t>) lets
- * callers point this buffer at PSRAM or a custom pool instead of the
+ * callers point these buffers at PSRAM or a custom pool instead of the
  * default heap, without touching decoder internals. Sizing happens once
  * at startup, never per-frame, so this doesn't reintroduce allocation
  * into the decode hot path.
@@ -54,17 +62,19 @@ struct Frame {
    * luma, per 4:2:0 subsampling).
    */
   static const int kMaxChromaSize = (H264_MAX_WIDTH / 2) * (H264_MAX_HEIGHT / 2);
-  /// Upper bound on the combined Y+U+V buffer's element count.
+  /// Upper bound on the combined Y+U+V byte count (for memory-budget docs only - not one allocation, see dataY/dataU/dataV below).
   static const int kMaxTotalSize = kMaxLumaSize + 2 * kMaxChromaSize;
 
   /**
-   * Y, U, and V samples, contiguous (Y first, then U, then V) - see
-   * y()/u()/v() for plane pointers into this buffer. Prefer those (or
-   * yRow()/uRow()/vRow()) over indexing `data` directly, since the
-   * plane boundaries are compile-time offsets (kMaxLumaSize /
-   * kMaxChromaSize), not derived from this picture's actual width/height.
+   * Y, U, and V samples, each its own separate allocation (unlike a
+   * merged single buffer, this keeps every individual allocation small
+   * enough to fit a fragmented heap's largest free block - see the file
+   * header comment above). Prefer y()/u()/v() (or yRow()/uRow()/vRow())
+   * over indexing these directly.
    */
-  std::vector<uint8_t, Allocator> data;
+  std::vector<uint8_t, Allocator> dataY;
+  std::vector<uint8_t, Allocator> dataU;
+  std::vector<uint8_t, Allocator> dataV;
 
   int width = 0;   ///< coded (MB-aligned) luma width in samples
   int height = 0;  ///< coded (MB-aligned) luma height in samples
@@ -76,15 +86,17 @@ struct Frame {
   bool isReference = false; ///< true if this picture was coded with nal_ref_idc != 0
 
   /**
-   * Allocates the backing buffer at its maximum (H264_MAX_WIDTH x
-   * H264_MAX_HEIGHT, Y+U+V combined) size if not already done. Safe to
-   * call more than once (e.g. once per setSize()); a no-op after the
-   * first call, so it never re-allocates in the per-frame decode hot
-   * path.
+   * Allocates the three backing buffers at their maximum
+   * (H264_MAX_WIDTH x H264_MAX_HEIGHT-derived) sizes if not already
+   * done. Safe to call more than once (e.g. once per setSize()); a
+   * no-op after the first call, so it never re-allocates in the
+   * per-frame decode hot path.
    */
   void ensureAllocated() {
-    if (!data.empty()) return;
-    data.resize(kMaxTotalSize);
+    if (!dataY.empty()) return;
+    dataY.resize(kMaxLumaSize);
+    dataU.resize(kMaxChromaSize);
+    dataV.resize(kMaxChromaSize);
   }
 
   /**
@@ -102,32 +114,37 @@ struct Frame {
   }
 
   /**
-   * Releases the backing buffer back to the allocator (data.clear() +
-   * shrink_to_fit()) and resets dimensions to zero - the counterpart to
-   * ensureAllocated()/setSize(), for callers that want to reclaim this
-   * picture's ~38KB+ (H264_MAX_WIDTH x H264_MAX_HEIGHT-sized) buffer when
-   * done decoding/encoding instead of leaving it resident for the rest of
-   * the program's lifetime. setSize() (via ensureAllocated()) reallocates
-   * on the next use, same as before this Frame's first setSize() call.
+   * Releases the three backing buffers back to the allocator (clear() +
+   * shrink_to_fit() each) and resets dimensions to zero - the
+   * counterpart to ensureAllocated()/setSize(), for callers that want to
+   * reclaim this picture's ~38KB+ (H264_MAX_WIDTH x H264_MAX_HEIGHT-
+   * sized) buffers when done decoding/encoding instead of leaving them
+   * resident for the rest of the program's lifetime. setSize() (via
+   * ensureAllocated()) reallocates on the next use, same as before this
+   * Frame's first setSize() call.
    */
   void release() {
-    data.clear();
-    data.shrink_to_fit();
+    dataY.clear();
+    dataY.shrink_to_fit();
+    dataU.clear();
+    dataU.shrink_to_fit();
+    dataV.clear();
+    dataV.shrink_to_fit();
     width = height = strideY = strideC = 0;
   }
 
   /// Pointer to the start of the luma plane.
-  uint8_t* y() { return data.data(); }
+  uint8_t* y() { return dataY.data(); }
   /// Pointer to the start of the Cb (blue-difference chroma) plane.
-  uint8_t* u() { return data.data() + kMaxLumaSize; }
+  uint8_t* u() { return dataU.data(); }
   /// Pointer to the start of the Cr (red-difference chroma) plane.
-  uint8_t* v() { return data.data() + kMaxLumaSize + kMaxChromaSize; }
+  uint8_t* v() { return dataV.data(); }
   /// const overload of y().
-  const uint8_t* y() const { return data.data(); }
+  const uint8_t* y() const { return dataY.data(); }
   /// const overload of u().
-  const uint8_t* u() const { return data.data() + kMaxLumaSize; }
+  const uint8_t* u() const { return dataU.data(); }
   /// const overload of v().
-  const uint8_t* v() const { return data.data() + kMaxLumaSize + kMaxChromaSize; }
+  const uint8_t* v() const { return dataV.data(); }
 
   /// Pointer to the first luma sample of row `row`.
   uint8_t* yRow(int row) { return y() + (size_t)row * strideY; }

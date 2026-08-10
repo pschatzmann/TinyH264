@@ -6,14 +6,25 @@
  * (rounded up to a macroblock, i.e. multiples of 16). curFrame_ (being
  * reconstructed) plus up to H264_MAX_REF_FRAMES stored reference pictures
  * are kept resident - see H264_MAX_REF_FRAMES below for how that count is
- * chosen and how it can be lowered at runtime.
+ * chosen and how it can be lowered at runtime. Each picture's Y/U/V planes
+ * are 3 separate heap allocations (see Frame in common/h264_frame.h), not
+ * one merged buffer - this matters on a plain ESP32, where WiFi/BT can
+ * fragment the heap badly enough that the *largest single contiguous
+ * block* is well below total free heap; splitting keeps each individual
+ * allocation small enough to still find a home.
  *
- * QCIF (176x144): 38016 bytes/frame -> ~76KB for 2 buffers (1 current + 1
- * reference), ~152KB for 4 (1 current + 3 references, this file's default).
- * QVGA (320x240): 115200 bytes/frame -> ~230KB for 2 buffers (needs PSRAM).
- *
- * Raise these only if the target board has PSRAM (e.g. ESP32-S3) and the
- * buffers are allocated from PSRAM (see H264_FRAME_ALLOC_PSRAM below).
+ * QCIF (176x144): 38016 bytes/frame (25344 Y + 6336 U + 6336 V) -> ~76KB
+ * for 2 buffers (1 current + 1 reference), ~152KB for 4 (this file's
+ * H264_MAX_REF_FRAMES=3 default).
+ * QVGA (320x240): 115200 bytes/frame (76800 Y + 19200 U + 19200 V) ->
+ * ~230KB for 2 buffers. Each individual plane allocation (largest: Y at
+ * 76800 bytes) is small enough to fit a fragmented plain-ESP32 heap in
+ * practice, but the *total* (up to ~460KB at the 4-buffer default) may
+ * exceed free heap - call TinyH264Decoder::setMaxRefFrames(1) at QVGA on
+ * a plain ESP32 to cap it to 2 resident buffers; see
+ * examples/DecodeFromProgmem for a worked example. PSRAM (e.g. ESP32-S3
+ * via PSRAMAllocatorESP32, see H264_FRAME_ALLOC_PSRAM below) removes the
+ * budget pressure entirely and isn't required just to make QVGA fit.
  */
 
 #ifndef H264_MAX_WIDTH

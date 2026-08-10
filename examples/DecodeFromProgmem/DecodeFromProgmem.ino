@@ -5,9 +5,16 @@
  * unmodified as a smoke test that the library is working - the decoder
  * core is plain portable C++17 with no ESP32-specific dependencies, so
  * this example (default std::allocator<uint8_t> - no PSRAM) builds for
- * any Arduino target with enough RAM for the QCIF picture buffers
- * (~76KB for two frames; see h264_config.h). Validated via arduino-cli
- * against both esp32:esp32:esp32 and rp2040:rp2040:rpipico.
+ * any Arduino target with enough RAM for the picture buffers. Picture
+ * buffers are sized to the compile-time H264_MAX_WIDTH x
+ * H264_MAX_HEIGHT budget (see h264_config.h), not this clip's actual
+ * QCIF resolution - at the project default (QVGA, 320x240) that's
+ * ~115KB per resident frame, so setMaxRefFrames(1) below caps it to 2
+ * resident frames (~230KB) instead of the compile-time default of 4
+ * (~460KB), which a plain ESP32's heap - often fragmented well below
+ * its nominal free-heap total by WiFi/BT - may not have room for even
+ * though the total looks large enough on paper. Validated via
+ * arduino-cli against both esp32:esp32:esp32 and rp2040:rp2040:rpipico.
  *
  * Also benchmarks decode speed: the short clip is decoded repeatedly
  * (kBenchmarkReps times) and per-frame wall-clock decode time is measured
@@ -126,6 +133,18 @@ void setup() {
   printFreeHeap("Free heap before decode");
 
   decoder.setCallback(onFrame);
+
+  /*
+   * See the file header comment: caps resident reference pictures to 1
+   * (2 resident frames total with curFrame_) so this example stays within
+   * a plain ESP32's heap at the project's default QVGA compile-time
+   * buffer size, even though this particular clip only needs 1 to decode
+   * correctly (it has no long-term reference dependencies beyond the
+   * previous picture). Raise this (up to the H264_MAX_REF_FRAMES compile-
+   * time cap) if your board has more free heap or you use the PSRAM
+   * allocator - see DecodeFromProgmemPSRAM.
+   */
+  decoder.setMaxRefFrames(1);
 
   /*
    * The embedded clip is in PROGMEM (flash); copy it to a small RAM buffer

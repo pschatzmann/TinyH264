@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <vector>
 #include "h264_config.h"
 #include "h264_tables.h"
 
@@ -94,19 +95,33 @@ struct MacroblockInfo {
  * derivation needs: a neighbor is available for prediction only if it
  * has already been decoded *and* belongs to the same slice (so
  * prediction never reaches across an as-yet-undecoded or
- * differently-sliced macroblock). Sized statically to H264_MAX_MBS - no
- * per-picture heap allocation.
+ * differently-sliced macroblock). Backing storage is heap-allocated up
+ * to H264_MAX_MBS entries, lazily on first reset() call, and never
+ * resized again after that - the same allocate-once idiom
+ * Frame::ensureAllocated() uses, for the same reason: at larger
+ * resolutions (e.g. QVGA's 300 macroblocks, ~40KB of MacroblockInfo
+ * alone) a *static* array member here overflows a plain ESP32's DRAM
+ * .bss segment before the sketch even runs - confirmed by an actual
+ * arduino-cli link failure, not just budget math, the same way the
+ * original Frame overflow was found.
  */
 class MbInfoTable {
  public:
   /**
    * Clears all per-macroblock state and marks every macroblock as
    * "not yet decoded" (sliceId -1), ready to start a new picture of
-   * `mbWidth` x `mbHeight` macroblocks.
+   * `mbWidth` x `mbHeight` macroblocks. Allocates the backing storage
+   * (at H264_MAX_MBS capacity) on the first call; a no-op allocation-wise
+   * on subsequent calls, so this doesn't reintroduce per-picture heap
+   * allocation into the decode/encode hot path.
    */
   void reset(int mbWidth, int mbHeight) {
     mbWidth_ = mbWidth;
     mbHeight_ = mbHeight;
+    if (sliceId_.empty()) {
+      sliceId_.resize(H264_MAX_MBS);
+      mb_.resize(H264_MAX_MBS);
+    }
     int n = mbWidth * mbHeight;
     for (int i = 0; i < n; i++) {
       sliceId_[i] = -1;
@@ -194,8 +209,8 @@ class MbInfoTable {
 
  private:
   int mbWidth_ = 0, mbHeight_ = 0;
-  int16_t sliceId_[H264_MAX_MBS];
-  MacroblockInfo mb_[H264_MAX_MBS];
+  std::vector<int16_t> sliceId_;
+  std::vector<MacroblockInfo> mb_;
 };
 
 /**

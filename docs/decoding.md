@@ -180,3 +180,26 @@ of the sketch for internal DRAM.
 See `examples/DecodeFromProgmem/` for a complete, self-contained sketch
 (a tiny embedded test clip - no camera/SD/network needed) that runs on
 any ESP32 board as a smoke test.
+
+See `examples/DecodeToDisplay/` for a complete sketch that decodes a
+test clip and streams it to an ILI9341 SPI TFT via
+[TinyGPU](https://github.com/pschatzmann/TinyGPU), using the same
+band-by-band `toRGB565()` windowed overload above to avoid ever needing
+a full-screen RGB565 framebuffer in one contiguous allocation. Decodes
+at 256x192, not the project's QVGA compile-time default or the panel's
+full 320x240 resolution, via a local `#define H264_MAX_WIDTH`/
+`H264_MAX_HEIGHT` override (h264_config.h's `#ifndef` guards support
+this per sketch) - real-hardware testing on a plain ESP32 showed QVGA's
+~283KB combined requirement (2 picture buffers + the QVGA-sized
+per-macroblock metadata table) plus TinyGPU/SPI's own overhead exceeding
+actual free heap and crashing with an uncaught `std::bad_alloc`, even
+though no single allocation was too large on its own - a genuine
+total-memory shortfall, not the fragmentation problem `toRGB565()`'s
+band-streaming design solves. 256x192 was solved for as the largest
+4:3, macroblock-aligned resolution leaving a real (~110KB) safety
+margin against the measured free heap, rather than the largest that
+fits at zero margin (~326x245 - i.e. QVGA itself was already at that
+wall). See the sketch's file
+header comment for the exact numbers and how to raise it back to QVGA on
+a PSRAM-equipped board. ESP32-only (SPI pin-remap API); ILI9341
+wiring/orientation may need adjusting for your specific panel.

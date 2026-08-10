@@ -4,21 +4,21 @@
  * h264_decoder.h's Decoder::begin()/end(), and their TinyH264Encoder/
  * TinyH264Decoder public-API wrappers). Uses the internal Encoder<>/
  * Decoder<> classes directly (not the TinyH264*<> wrappers) since this
- * test needs to inspect frame().data.empty() to confirm memory was
+ * test needs to inspect frame().dataY.empty() to confirm memory was
  * actually freed/reserved, which the public wrappers don't expose.
  *
  * Checks, against a real 10-frame QCIF motion sequence
  * (assets/all_frames_ref.yuv, the same oracle test_encode_pframe.cpp/
  * test_encode_autoframe.cpp use):
- * 1. begin() eagerly allocates frame_/refFrame_ (frame().data non-empty
+ * 1. begin() eagerly allocates frame_/refFrame_ (frame().dataY non-empty
  *    before any encode call) - unlike the default lazy behavior, where
- *    frame().data stays empty until the first encodeFrame() call.
+ *    frame().dataY stays empty until the first encodeFrame() call.
  * 2. Calling begin() (with or without a prior encode) doesn't change the
  *    encoded bitstream - it's purely an eager-allocation/state-reset
  *    hook, not a new code path - by encoding the same 10-frame sequence
  *    with and without a preceding begin() call and diffing the output
  *    byte-for-byte.
- * 3. end() actually frees the memory (frame().data.empty() afterward).
+ * 3. end() actually frees the memory (frame().dataY.empty() afterward).
  * 4. end() then begin() + re-encoding the same sequence from scratch
  *    produces byte-identical output to a fresh, never-used Encoder -
  *    i.e. end() really resets stream state, not just memory.
@@ -93,7 +93,7 @@ int main() {
   size_t nPlain, nBegin;
   {
     Encoder<std::allocator<uint8_t>> encPlain;
-    if (!encPlain.frame().data.empty()) {
+    if (!encPlain.frame().dataY.empty()) {
       printf("FAIL: frame_ allocated before any encode/begin() call\n");
       failures++;
     }
@@ -101,7 +101,7 @@ int main() {
 
     Encoder<std::allocator<uint8_t>> encBegin;
     encBegin.begin(/*reserveColorConversionScratch=*/true);
-    if (encBegin.frame().data.empty()) {
+    if (encBegin.frame().dataY.empty()) {
       printf("FAIL: begin() didn't eagerly allocate frame_\n");
       failures++;
     }
@@ -123,12 +123,12 @@ int main() {
     Encoder<std::allocator<uint8_t>> enc;
     std::vector<uint8_t> bsFirst(2000000);
     encodeSequence(enc, allFrames, numFrames, bsFirst);
-    if (enc.frame().data.empty()) {
+    if (enc.frame().dataY.empty()) {
       printf("FAIL: frame_ not allocated after encoding\n");
       failures++;
     }
     enc.end();
-    if (!enc.frame().data.empty()) {
+    if (!enc.frame().dataY.empty()) {
       printf("FAIL: end() didn't free frame_\n");
       failures++;
     }
@@ -150,14 +150,14 @@ int main() {
   // --- 5. Decoder::begin()/end() ---
   {
     Decoder<std::allocator<uint8_t>> decPlain;
-    if (!decPlain.frame().data.empty()) {
+    if (!decPlain.frame().dataY.empty()) {
       printf("FAIL: curFrame_ allocated before any decode/begin() call\n");
       failures++;
     }
 
     Decoder<std::allocator<uint8_t>> decBegin;
     decBegin.begin();
-    if (decBegin.frame().data.empty()) {
+    if (decBegin.frame().dataY.empty()) {
       printf("FAIL: Decoder::begin() didn't eagerly allocate curFrame_\n");
       failures++;
     }
@@ -191,12 +191,12 @@ int main() {
              framesPlain);
     }
 
-    if (decBegin.frame().data.empty()) {
+    if (decBegin.frame().dataY.empty()) {
       printf("FAIL: curFrame_ not allocated after decoding\n");
       failures++;
     }
     decBegin.end();
-    if (!decBegin.frame().data.empty()) {
+    if (!decBegin.frame().dataY.empty()) {
       printf("FAIL: Decoder::end() didn't free curFrame_\n");
       failures++;
     }
