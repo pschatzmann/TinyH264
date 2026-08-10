@@ -28,7 +28,7 @@
  * motionSearch16x16()) - no sub-pel refinement, no fast-search algorithm
  * (diamond/hex/etc) - consistent with this encoder's whole "correctness
  * and simplicity first, not maximal compression efficiency" design
- * center (see the project README's "Encoding" section).
+ * center (see docs/encoding.md).
  */
 
 namespace tinyh264 {

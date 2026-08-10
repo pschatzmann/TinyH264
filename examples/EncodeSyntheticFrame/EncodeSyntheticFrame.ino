@@ -21,7 +21,7 @@
  * elsewhere for decoding rather than keeping a decoder resident on the
  * same device.)
  *
- * Current scope (see the project README's "Encoding" section):
+ * Current scope (see docs/encoding.md):
  * I_16x16/I_4x4 intra modes, P_16x16/P_Skip inter with automatic Intra
  * fallback on a poor motion match (single reference frame, integer-pel-
  * only motion search, no P_16x8/P_8x16/P_8x8 sub-partitions), simple

@@ -326,8 +326,8 @@ class Encoder {
    * established width/height, frame_num) back to how a freshly
    * constructed Encoder starts - the counterpart to begin(), for callers
    * that want to reclaim this encoder's resident memory (~76KB+ for
-   * frame_+refFrame_ alone at QCIF - see the project README's "Memory
-   * budget" section) before starting an unrelated sequence, or before
+   * frame_+refFrame_ alone at QCIF - see docs/memory-budget.md) before
+   * starting an unrelated sequence, or before
    * doing something else memory-hungry, rather than keeping it allocated
    * for the rest of the program's lifetime. Deliberately leaves
    * configuration (setTargetBitrate()'s target, setKeyframeInterval()'s

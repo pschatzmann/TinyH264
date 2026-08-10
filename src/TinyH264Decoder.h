@@ -100,7 +100,10 @@ class TinyH264Decoder {
    * setup(), if you want any allocation failure to surface
    * deterministically before the stream starts rather than mid-decode.
    */
-  void begin() { decoder_.begin(); }
+  void begin() { 
+    lastStatus_ = Status::kNeedMoreData;
+    decoder_.begin(); 
+  }
 
   /**
    * Releases this decoder's picture buffers and resets it to a fresh,
@@ -111,7 +114,9 @@ class TinyH264Decoder {
    * still alive. Safe to call begin()/write() again afterward to start
    * over.
    */
-  void end() { decoder_.end(); }
+  void end() { 
+    decoder_.end(); 
+    lastStatus_ = Status::kNeedMoreData;}
 
   /**
    * Feeds one buffer of Annex-B data (NAL units delimited by 00 00 01 / 00

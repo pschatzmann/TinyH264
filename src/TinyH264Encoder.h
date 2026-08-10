@@ -7,7 +7,7 @@
 
 // TinyH264Encoder: a minimal, header-only H.264 Baseline Profile (CAVLC)
 // encoder for microcontrollers, matching TinyH264Decoder's own scope and
-// design center - see the project README's "Encoding" section for full
+// design center - see docs/encoding.md for full
 // scope (I_16x16/I_4x4 intra, P_16x16/P_Skip inter with automatic
 // Intra-in-P-slice fallback, single-reference-frame P-frames, simple
 // rate control).
