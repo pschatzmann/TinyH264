@@ -1,0 +1,11 @@
+version: "0.1.0"
+description: A minimal H.264 (Baseline Profile, CAVLC) video decoder for microcontrollers.
+url: https://github.com/pschatzmann/TinyH264
+repository: https://github.com/pschatzmann/TinyH264.git
+issues: https://github.com/pschatzmann/TinyH264/issues
+license: GPL-3.0-only
+tags:
+  - video
+  - h264
+  - decoder
+  - codec

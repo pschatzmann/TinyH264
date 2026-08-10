@@ -1,0 +1,919 @@
+#pragma once
+#include <stdint.h>
+#include <stddef.h>
+#include <memory>
+#include <vector>
+#include "h264_bitwriter.h"
+#include "h264_color_convert.h"
+#include "h264_macroblock_encode.h"
+#include "h264_macroblock_encode_inter.h"
+#include "h264_nal_writer.h"
+#include "h264_sps_pps_writer.h"
+#include "../common/h264_frame.h"
+#include "../common/h264_mb_info.h"
+#include "../common/h264_nal_types.h"
+#include "h264_config.h"
+#include "../decoder/h264_deblock.h"
+#include "../decoder/h264_sps_pps.h"
+
+// Header-only. Top-level encoder driving loop - the encoder-side
+// counterpart to decoder/h264_decoder.h's Decoder class.
+//
+// encodeFrame() (and its color-format overloads encodeFrameRgb888()/
+// encodeFrameRgb666()/encodeFrameRgb565()/encodeFrameYuv422()) is the
+// *only* public encode entry point: it decides I-frame vs. P-frame
+// automatically (no reference yet, a size change via setSize(), or an
+// optional setKeyframeInterval() all force an I-frame; everything else
+// becomes a P-frame against the single most-recently-encoded picture) -
+// just call it once per picture, in order, and don't think about the I/P
+// distinction at all. Picture geometry/stride/QP policy are configured
+// once via setSize()/setStride()/setPackedStride()/setQp() instead of
+// being passed to every call (see each setter's own comment) - so every
+// encodeFrame()-family call takes only source pointer(s) plus a
+// destination buffer.
+//
+// There is deliberately no public way to force an I-frame or a P-frame
+// on a specific call anymore (an earlier version of this class exposed
+// encodeIFrame()/encodePFrame() as public "lower-level primitives" for
+// that) - setKeyframeInterval() (periodic) and setSize() (a resolution
+// change always forces an I-frame, since a P-frame can't represent one)
+// are the only remaining ways to influence *when* a keyframe happens.
+// The I-frame/P-frame encoding logic itself still exists, just as a
+// private implementation detail encodeFrame() dispatches to internally
+// (see the private section below) - kept, and kept correct, exactly as
+// before; only the public surface shrank.
+//
+// One deliberate cross-directory dependency: this file (only this file,
+// not h264_macroblock_encode.h) includes decoder/h264_deblock.h and
+// decoder/h264_sps_pps.h to run the *decoder's own, already ffmpeg-
+// verified* deblocking filter on the reconstructed picture before
+// returning - reimplementing it would be both wasteful and a real
+// correctness risk (the whole point of a closed-loop encoder is that its
+// own reconstruction matches what a real decoder produces, and this
+// project already has a verified deblocking filter). See the private
+// encodeIFrame()'s closing deblockPicture() call.
+
+namespace tinyh264 {
+
+/// Encodes one Baseline-profile CAVLC picture at a time into a real H.264
+/// Annex-B stream. Templated on Allocator exactly like decoder::Decoder,
+/// for the same reason: the two Frame<Allocator> objects this class holds
+/// (the closed-loop reconstruction plus the single P-frame reference -
+/// see h264_macroblock_encode.h's MbEncodeContext doc comment for why an
+/// encoder needs one at all) can be placed in PSRAM via a custom
+/// allocator on boards that have it.
+template <typename Allocator = std::allocator<uint8_t>>
+class Encoder {
+ public:
+  /// Constructs an Encoder, optionally pre-configuring picture width/
+  /// height (see setSize()'s own comment) and periodic keyframe interval
+  /// (see setKeyframeInterval()'s own comment) in one step instead of
+  /// calling both setters separately afterward - convenient when they're
+  /// already known at construction time (e.g. a fixed-resolution camera
+  /// feed). All three default to 0 (width/height unconfigured, no
+  /// periodic keyframe), matching a default-constructed Encoder's
+  /// previous behavior exactly - `Encoder<> enc;` still compiles and
+  /// behaves the same as before this constructor existed. setSize() (or
+  /// this constructor's `width`/`height`) must establish a real size
+  /// before the first encodeFrame() call, or it returns 0.
+  Encoder(int width = 0, int height = 0, int keyframeInterval = 0) {
+    setSize(width, height);
+    setKeyframeInterval(keyframeInterval);
+  }
+
+  /// Encodes one picture, automatically deciding I-frame vs. P-frame -
+  /// the only public encode entry point (see this file's own header
+  /// comment): call this once per picture, in order. Becomes an I-frame
+  /// (SPS + PPS + IDR slice) when there's no reference yet (the first
+  /// call), the size set via setSize() differs from the established
+  /// sequence (a resolution change - a P-frame can't represent that, so
+  /// this is not optional), or setKeyframeInterval() was configured and
+  /// enough frames have passed since the last one; every other call
+  /// becomes a P-frame (motion-compensated against the previous picture,
+  /// no SPS/PPS resent). Requires setSize() to have been called at least
+  /// once first (returns 0 otherwise, same as an invalid size); `srcY`/
+  /// `srcU`/`srcV` row strides default to tightly packed (`strideY ==`
+  /// the width from setSize(), `strideC == width/2`) unless overridden
+  /// via setStride(), and `qp` defaults to -1 (rate control via
+  /// setTargetBitrate() - fails cleanly, returning 0, if that was never
+  /// called) unless overridden via setQp(). Returns the number of bytes
+  /// written to `dst`, or 0 on any failure (invalid size, invalid qp,
+  /// `dstCapacity` too small - mirrors TinyH264Decoder's to*()
+  /// converters' size-checked-return convention; nothing usable is left
+  /// in `dst` in the too-small case, though the internal reconstructed-
+  /// picture state may still have been updated - call again with a
+  /// bigger buffer rather than trying to resume).
+  size_t encodeFrame(const uint8_t* srcY, const uint8_t* srcU,
+                      const uint8_t* srcV, uint8_t* dst, size_t dstCapacity) {
+    if (width_ <= 0 || height_ <= 0) return 0;
+    int strideY = defaultStrideY_ > 0 ? defaultStrideY_ : width_;
+    int strideC = defaultStrideC_ > 0 ? defaultStrideC_ : width_ / 2;
+    return encodeFrameExplicit(srcY, strideY, srcU, srcV, strideC, width_,
+                                height_, defaultQp_, dst, dstCapacity);
+  }
+
+  /// Same as encodeFrame(), for RGB888 source data (3 bytes/pixel, R/G/B
+  /// order - matches TinyH264Decoder::toRGB888()'s convention) instead of
+  /// separate YUV planes - converts internally to YUV 4:2:0 (see
+  /// convertRgb888ToYuv420(), h264_color_convert.h) before encoding, a
+  /// real, if modest, precision loss on top of the usual DCT quantization,
+  /// not a lossless passthrough. `rgbStride` defaults to `width*3`
+  /// (tightly packed) unless overridden via setPackedStride().
+  size_t encodeFrameRgb888(const uint8_t* rgb, uint8_t* dst,
+                            size_t dstCapacity) {
+    if (width_ <= 0 || height_ <= 0) return 0;
+    int stride = defaultPackedStride_ > 0 ? defaultPackedStride_ : width_ * 3;
+    return encodeFrameRgb888Explicit(rgb, stride, width_, height_, defaultQp_,
+                                      dst, dstCapacity);
+  }
+
+  /// Same as encodeFrame(), for RGB666 source data (3 bytes/pixel, each
+  /// byte's 6 significant bits left-justified in bits 7:2 - matches
+  /// TinyH264Decoder::toRGB666()'s convention). `rgbStride` defaults to
+  /// `width*3` (tightly packed) unless overridden via setPackedStride().
+  size_t encodeFrameRgb666(const uint8_t* rgb666, uint8_t* dst,
+                            size_t dstCapacity) {
+    if (width_ <= 0 || height_ <= 0) return 0;
+    int stride = defaultPackedStride_ > 0 ? defaultPackedStride_ : width_ * 3;
+    return encodeFrameRgb666Explicit(rgb666, stride, width_, height_,
+                                      defaultQp_, dst, dstCapacity);
+  }
+
+  /// Same as encodeFrame(), for RGB565 source data (uint16_t/pixel, 5-6-5
+  /// packed - matches TinyH264Decoder::toRGB565()'s convention).
+  /// `rgbStride` (in uint16_t entries) defaults to `width` (tightly
+  /// packed) unless overridden via setPackedStride().
+  size_t encodeFrameRgb565(const uint16_t* rgb565, uint8_t* dst,
+                            size_t dstCapacity) {
+    if (width_ <= 0 || height_ <= 0) return 0;
+    int stride = defaultPackedStride_ > 0 ? defaultPackedStride_ : width_;
+    return encodeFrameRgb565Explicit(rgb565, stride, width_, height_,
+                                      defaultQp_, dst, dstCapacity);
+  }
+
+  /// Same as encodeFrame(), for YUYV-order packed YUV 4:2:2 source data
+  /// (Y0 U0 Y1 V0 per horizontal pixel pair - the common camera-module
+  /// convention, e.g. OV2640/OV7670 output). `yuyvStride` defaults to
+  /// `width*2` (tightly packed) unless overridden via setPackedStride().
+  size_t encodeFrameYuv422(const uint8_t* yuyv, uint8_t* dst,
+                            size_t dstCapacity) {
+    if (width_ <= 0 || height_ <= 0) return 0;
+    int stride = defaultPackedStride_ > 0 ? defaultPackedStride_ : width_ * 2;
+    return encodeFrameYuv422Explicit(yuyv, stride, width_, height_,
+                                      defaultQp_, dst, dstCapacity);
+  }
+
+  /// Configures rate control: `bitsPerSecond` / `fps` gives a target
+  /// average size per frame, in bytes, that encodeFrame() (and its
+  /// color-format overloads) aim for whenever the configured `qp` is -1
+  /// (setQp()'s default, if setQp() was never called). A simple,
+  /// real-time-appropriate feedback controller (not a two-pass/lookahead
+  /// one - consistent with this encoder's whole "correctness and
+  /// simplicity over maximal efficiency" design center): after each
+  /// rate-controlled frame, the *next* frame's QP is nudged up (smaller/
+  /// coarser) if the frame just produced came out over target, or down
+  /// (larger/finer) if under - see updateRateControl()'s own comment for
+  /// the exact step sizes. Must be called at least once before ever
+  /// leaving `qp` at -1; can be called again later to retarget mid-
+  /// sequence (e.g. a bandwidth change) - takes effect starting with the
+  /// next rate-controlled call.
+  void setTargetBitrate(int bitsPerSecond, double fps) {
+    int bytes = (int)(bitsPerSecond / fps / 8.0);
+    targetFrameBytes_ = bytes > 0 ? bytes : 1;
+  }
+
+  /// The QP actually used by the most recent encodeFrame()-family call -
+  /// always meaningful, but the only way to find out what rate control
+  /// chose when that call used `qp == -1`.
+  int lastQp() const { return lastQp_; }
+
+  /// Configures automatic periodic keyframes for encodeFrame() (and its
+  /// color-format overloads): a GOP size (the standard meaning, e.g.
+  /// ffmpeg's `-g`) - every `frames`-th picture becomes an I-frame even
+  /// though a valid reference already exists, instead of always P-frame
+  /// after the first picture, landing at picture 0, `frames`,
+  /// `2*frames`, ... `frames <= 0` (the default) disables this -
+  /// encodeFrame() then only re-keys on the cases that are never
+  /// optional (no reference yet, a resolution change). Real streaming
+  /// setups typically want a periodic keyframe anyway, so a decoder
+  /// joining mid-stream (or recovering from a lost/corrupted frame
+  /// upstream) has somewhere to resync - a fixed interval doesn't know
+  /// your actual frame rate, so pick `frames` as (seconds-between-
+  /// keyframes * your fps), not a guessed constant.
+  void setKeyframeInterval(int frames) { keyframeInterval_ = frames; }
+
+  /// Pre-establishes this encoder's picture width/height (must each be a
+  /// multiple of 16 - frame_cropping isn't implemented yet) so
+  /// encodeFrame() (and its color-format overloads) know what to encode
+  /// without taking width/height as a parameter every call. Writes
+  /// directly into the same width_/height_ this class already tracks
+  /// internally to detect resolution changes - calling setSize() again
+  /// with a different value is exactly how you tell encodeFrame() to
+  /// start a new resolution (forcing an I-frame, since a P-frame can't
+  /// represent that). begin() doesn't reset it, so setSize() can be
+  /// called either before or after begin(). Not validated here (an
+  /// invalid size set here just makes the next encodeFrame() call return
+  /// 0, same as encodeFrame() would report for any other failure).
+  void setSize(int width, int height) {
+    width_ = width;
+    height_ = height;
+  }
+
+  /// Overrides the Y/C plane row strides encodeFrame() passes through -
+  /// only needed if your source buffer has row padding (e.g. a camera
+  /// driver's frame buffer aligned wider than the actual picture);
+  /// without this, `strideY` defaults to the width from setSize() and
+  /// `strideC` to half that (tightly packed, the common case). Call
+  /// setSize() first - this doesn't independently validate width/height.
+  void setStride(int strideY, int strideC) {
+    defaultStrideY_ = strideY;
+    defaultStrideC_ = strideC;
+  }
+
+  /// Overrides the single packed-row stride encodeFrameRgb888()/
+  /// encodeFrameRgb666()/encodeFrameRgb565()/encodeFrameYuv422() pass
+  /// through - only needed for a padded source buffer, same rationale as
+  /// setStride() above (which is for the plain-YUV encodeFrame() instead).
+  /// Units match whichever format overload you actually call (bytes for
+  /// RGB888/RGB666/YUV422, uint16_t entries for RGB565 - see each one's
+  /// own doc comment); if you use more than one packed format with this
+  /// same Encoder instance, call this again before switching, since the
+  /// same stored value is shared across all of them. Without this, each
+  /// overload defaults to its own tightly-packed stride derived from the
+  /// width set via setSize().
+  void setPackedStride(int stride) { defaultPackedStride_ = stride; }
+
+  /// Overrides the `qp` encodeFrame() (and its color-format overloads)
+  /// use - 0-51 for a fixed QP, or -1 (the default, if this is never
+  /// called) to use rate control via setTargetBitrate() every call.
+  void setQp(int qp) { defaultQp_ = qp; }
+
+  /// The most recently encoded picture, reconstructed exactly as decoding
+  /// the just-produced bitstream back would give (closed loop) - useful
+  /// for measuring this encoder's own quality (e.g. PSNR against the
+  /// source) without needing a separate decode pass.
+  const Frame<Allocator>& frame() const { return frame_; }
+
+  /// Reserves this encoder's picture buffers (frame_ and refFrame_, each
+  /// up to their compile-time H264_MAX_WIDTH x H264_MAX_HEIGHT maximum -
+  /// see h264_frame.h) up front, instead of the default allocate-on-
+  /// first-encode behavior (Frame::ensureAllocated(), otherwise first
+  /// triggered by the first encodeFrame() call). Pass
+  /// `reserveColorConversionScratch = true` to also reserve the
+  /// yuvY_/yuvU_/yuvV_ scratch buffers the encodeFrameRgb888()/
+  /// encodeFrameRgb666()/encodeFrameRgb565()/encodeFrameYuv422()
+  /// overloads need (otherwise left unallocated until one of those is
+  /// actually called, same as before this method existed - see
+  /// ensureYuvScratchAllocated()). Entirely optional - every
+  /// encodeFrame()-family call still allocates lazily on its own if this
+  /// was never called - but useful on an embedded target that wants any
+  /// allocation failure to surface deterministically during setup()
+  /// rather than mid-stream. Also resets any prior stream state (as if
+  /// this Encoder had just been constructed - see end()) *except*
+  /// width_/height_ (deliberately - see setSize()'s own comment: it
+  /// writes into the same fields, and should work whether called before
+  /// or after begin()), so it's safe to call again to start a fresh,
+  /// unrelated sequence. Safe to call more than once
+  /// (Frame::ensureAllocated() is itself idempotent).
+  void begin(bool reserveColorConversionScratch = false) {
+    frame_.ensureAllocated();
+    refFrame_.ensureAllocated();
+    if (reserveColorConversionScratch) ensureYuvScratchAllocated();
+    haveReference_ = false;
+    frameNum_ = 0;
+    framesSinceKeyframe_ = 0;
+  }
+
+  /// Releases every picture/scratch buffer this encoder holds (frame_,
+  /// refFrame_, and the color-conversion scratch buffers if they were
+  /// ever allocated, via Frame::release()/vector::shrink_to_fit()) and
+  /// resets this encoder's stream state (reference-picture bookkeeping,
+  /// established width/height, frame_num) back to how a freshly
+  /// constructed Encoder starts - the counterpart to begin(), for callers
+  /// that want to reclaim this encoder's resident memory (~76KB+ for
+  /// frame_+refFrame_ alone at QCIF - see the project README's "Memory
+  /// budget" section) before starting an unrelated sequence, or before
+  /// doing something else memory-hungry, rather than keeping it allocated
+  /// for the rest of the program's lifetime. Deliberately leaves
+  /// configuration (setTargetBitrate()'s target, setKeyframeInterval()'s
+  /// interval, setQp()/setStride()/setPackedStride()'s values) untouched
+  /// - those are settings, not per-stream state, and a caller that
+  /// configured them before end() shouldn't have that silently undone.
+  /// Not required before destruction - the members' own destructors free
+  /// everything regardless - only useful for freeing memory *before*
+  /// that, while this object is still alive. Safe to call
+  /// begin()/encodeFrame() again afterward to start over (after a fresh
+  /// setSize() call, since end() does reset width_/height_).
+  void end() {
+    frame_.release();
+    refFrame_.release();
+    yuvY_.clear();
+    yuvY_.shrink_to_fit();
+    yuvU_.clear();
+    yuvU_.shrink_to_fit();
+    yuvV_.clear();
+    yuvV_.shrink_to_fit();
+    haveReference_ = false;
+    frameNum_ = 0;
+    width_ = height_ = 0;
+    ppsBaseQp_ = 0;
+    framesSinceKeyframe_ = 0;
+  }
+
+ private:
+  // ---------------------------------------------------------------------
+  // Explicit-parameter I-frame/P-frame implementation. This used to be
+  // this class's public API (encodeIFrame()/encodePFrame() and their
+  // color-format overloads, plus an explicit-parameter encodeFrame()
+  // dispatcher) - moved here, unchanged in behavior, once the only
+  // public entry points became the defaults-driven encodeFrame()-family
+  // methods above. Still exactly what makes an I-frame an I-frame and a
+  // P-frame a P-frame; only the public surface shrank.
+  // ---------------------------------------------------------------------
+
+  /// Encodes one I-frame from raw YUV 4:2:0 planar source data (three
+  /// separate planes/strides) into `dst`, a complete Annex-B byte stream
+  /// (SPS + PPS + IDR slice NALs, each with a 4-byte start code).
+  /// `width`/`height` must each be a multiple of 16 (frame_cropping_flag
+  /// isn't implemented yet - see writeSpsRbsp()); `qp` (0-51, lower =
+  /// higher quality/larger output) is applied uniformly across the whole
+  /// picture (no per-macroblock QP adaptation within one frame). Pass
+  /// `qp = -1` to use rate control instead (see setTargetBitrate()) - the
+  /// encoder picks its own QP, adapted frame-to-frame toward the
+  /// configured target size; call setTargetBitrate() at least once
+  /// before ever passing -1, or this returns 0. Returns the number of
+  /// bytes written to `dst`, or 0 if `width`/`height` aren't valid, `qp`
+  /// is invalid (neither -1 nor 0-51, or -1 without a configured target),
+  /// or `dstCapacity` was too small (mirrors TinyH264Decoder's to*()
+  /// converters' size-checked-return convention; nothing is written to
+  /// `dst` in the too-small case, though the internal reconstructed-
+  /// picture state may still have been updated - call again with a
+  /// bigger buffer rather than trying to resume).
+  size_t encodeIFrame(const uint8_t* srcY, int srcStrideY, const uint8_t* srcU,
+                       const uint8_t* srcV, int srcStrideC, int width,
+                       int height, int qp, uint8_t* dst, size_t dstCapacity) {
+    if (width <= 0 || height <= 0 || (width % 16) != 0 || (height % 16) != 0) {
+      return 0;
+    }
+    if (width > H264_MAX_WIDTH || height > H264_MAX_HEIGHT) return 0;
+    if (!resolveQp(&qp)) return 0;
+
+    frame_.setSize(width, height);
+    int mbWidth = width / 16, mbHeight = height / 16;
+    mbInfo_.reset(mbWidth, mbHeight);
+    width_ = width;
+    height_ = height;
+
+    size_t o = 0;
+
+    uint8_t hdrRbsp[64];
+    BitWriter spsW(hdrRbsp, sizeof(hdrRbsp));
+    writeSpsRbsp(spsW, width, height, /*levelIdc=*/30, /*maxNumRefFrames=*/1);
+    if (spsW.error()) return 0;
+    size_t n = writeNalUnit(dst + o, dstCapacity - o, /*nalRefIdc=*/3,
+                             kNalSps, hdrRbsp, spsW.bytesWritten());
+    if (n == 0) return 0;
+    o += n;
+
+    BitWriter ppsW(hdrRbsp, sizeof(hdrRbsp));
+    writePpsRbsp(ppsW, qp);
+    ppsBaseQp_ = qp;
+    if (ppsW.error()) return 0;
+    n = writeNalUnit(dst + o, dstCapacity - o, /*nalRefIdc=*/3, kNalPps,
+                      hdrRbsp, ppsW.bytesWritten());
+    if (n == 0) return 0;
+    o += n;
+
+    BitWriter sliceW(sliceScratch_, sizeof(sliceScratch_));
+    writeSliceHeaderIdr(sliceW);
+
+    MbEncodeContext<Allocator> ctx;
+    ctx.frame = &frame_;
+    ctx.mbInfo = &mbInfo_;
+    ctx.chromaQpIndexOffset = 0;  // matches writePpsRbsp()'s fixed choice
+    ctx.sliceId = 0;
+    ctx.srcY = srcY;
+    ctx.srcStrideY = srcStrideY;
+    ctx.srcU = srcU;
+    ctx.srcV = srcV;
+    ctx.srcStrideC = srcStrideC;
+
+    int qpRunning = qp;
+    for (int mbY = 0; mbY < mbHeight; mbY++) {
+      for (int mbX = 0; mbX < mbWidth; mbX++) {
+        mbInfo_.beginMb(mbX, mbY, ctx.sliceId);
+        ctx.mbX = mbX;
+        ctx.mbY = mbY;
+
+        // I_16x16-vs-I_4x4 mode decision (see shouldUseIntra4x4()'s own
+        // comment for the heuristic): chooseIntra16x16Mode() is called
+        // here purely to get a real SAD figure to compare against - it
+        // also writes its winning prediction into frame_, which is
+        // harmless whichever way the decision goes (encodeMacroblockIntra16x16()
+        // redoes the same, deterministic call internally if I_16x16 wins,
+        // cheaply; encodeMacroblockIntra4x4()'s own per-block prediction
+        // calls overwrite this trial prediction naturally as they run if
+        // I_4x4 wins - no explicit rollback needed either way).
+        bool leftAvail = mbInfo_.leftAvailable(mbX, mbY, ctx.sliceId);
+        bool topAvail = mbInfo_.topAvailable(mbX, mbY, ctx.sliceId);
+        bool topLeftAvail = mbInfo_.topLeftAvailable(mbX, mbY, ctx.sliceId);
+        chooseIntra16x16Mode(ctx, leftAvail, topAvail, topLeftAvail);
+        int i16x16Sad = sadLuma16x16(ctx);
+
+        if (shouldUseIntra4x4(ctx, i16x16Sad)) {
+          qpRunning = encodeMacroblockIntra4x4(sliceW, ctx, qpRunning, qp);
+        } else {
+          qpRunning = encodeMacroblockIntra16x16(sliceW, ctx, qpRunning, qp);
+        }
+        if (sliceW.error()) return 0;
+      }
+    }
+    sliceW.rbspTrailingBits();
+    if (sliceW.error()) return 0;
+
+    n = writeNalUnit(dst + o, dstCapacity - o, /*nalRefIdc=*/3, kNalSliceIdr,
+                      sliceScratch_, sliceW.bytesWritten());
+    if (n == 0) return 0;
+    o += n;
+
+    // Matches this class's own fixed, minimal PPS (writePpsRbsp()): CAVLC
+    // doesn't touch any Pps field deblockPicture() doesn't also need
+    // defaulted correctly, and deblocking_filter_control_present_flag ==
+    // 0 means every macroblock's disableDeblockIdc/alphaC0OffsetDiv2/
+    // betaOffsetDiv2 (MacroblockInfo, left at their zero defaults by
+    // encodeMacroblockIntra16x16()) already represent "deblocking
+    // enabled, no offset" correctly without this class needing to touch
+    // them itself.
+    Pps pps;
+    pps.chromaQpIndexOffset = 0;
+    deblockPicture(frame_, mbInfo_, pps);
+
+    refFrame_.copyFrom(frame_);
+    haveReference_ = true;
+    frameNum_ = 1;  // next call's frame_num - this IDR itself used 0
+
+    updateRateControl(o);
+    return o;
+  }
+
+  /// Encodes one P-frame from raw YUV 4:2:0 planar source data against
+  /// the single most-recently-encoded picture as its sole motion-
+  /// compensation reference - see h264_macroblock_encode_inter.h's file
+  /// header for the full scope (P_16x16/P_Skip only, single reference,
+  /// integer-pel-only motion search). Writes *only* a P-slice NAL - no
+  /// SPS/PPS. `width`/`height` are implied from the last encodeIFrame()
+  /// call (must match - this function has no way to change picture
+  /// dimensions mid-sequence without a new SPS, which needs a fresh
+  /// encodeIFrame() call instead). Returns 0 if no prior encodeIFrame()
+  /// has established a reference yet, or (same as encodeIFrame()) if
+  /// `dstCapacity` was too small. Same `qp = -1` rate-control sentinel as
+  /// encodeIFrame().
+  size_t encodePFrame(const uint8_t* srcY, int srcStrideY, const uint8_t* srcU,
+                       const uint8_t* srcV, int srcStrideC, int qp,
+                       uint8_t* dst, size_t dstCapacity) {
+    if (!haveReference_) return 0;
+    if (!resolveQp(&qp)) return 0;
+    int width = width_, height = height_;
+    frame_.setSize(width, height);
+    int mbWidth = width / 16, mbHeight = height / 16;
+    mbInfo_.reset(mbWidth, mbHeight);
+
+    BitWriter sliceW(sliceScratch_, sizeof(sliceScratch_));
+    writeSliceHeaderP(sliceW, frameNum_, qp, ppsBaseQp_);
+
+    MbEncodeContext<Allocator> ctx;
+    ctx.frame = &frame_;
+    ctx.mbInfo = &mbInfo_;
+    ctx.chromaQpIndexOffset = 0;
+    ctx.sliceId = 0;
+    ctx.srcY = srcY;
+    ctx.srcStrideY = srcStrideY;
+    ctx.srcU = srcU;
+    ctx.srcV = srcV;
+    ctx.srcStrideC = srcStrideC;
+
+    int qpRunning = qp;
+    int totalMbs = mbWidth * mbHeight;
+    int pendingSkipRun = 0;
+    for (int mbAddr = 0; mbAddr < totalMbs; mbAddr++) {
+      int mbX = mbAddr % mbWidth, mbY = mbAddr / mbWidth;
+      mbInfo_.beginMb(mbX, mbY, ctx.sliceId);
+      ctx.mbX = mbX;
+      ctx.mbY = mbY;
+
+      int16_t bestMv[2];
+      int interSad = motionSearch16x16(ctx, refFrame_, bestMv);
+      int16_t skipMvVal[2];
+      skipMv(ctx, skipMvVal);
+
+      // P_Skip is only valid (per clause 8.4.1.1's implicit "zero
+      // residual" meaning) when the motion-estimated best match *is*
+      // the inferred skip MV *and* that MV's residual actually quantizes
+      // to zero - see wouldHaveZeroResidual()'s own comment. Either way
+      // this call leaves ctx.frame holding the correct motion-compensated
+      // prediction for skipMvVal, reused directly by encodeMacroblockPSkip()
+      // below without redoing the motion compensation. Checked first and
+      // short-circuits the Intra-vs-Inter decision below entirely - a
+      // genuine zero-bit skip is never worse than either alternative, so
+      // there's nothing to compare it against.
+      bool isSkip = bestMv[0] == skipMvVal[0] && bestMv[1] == skipMvVal[1] &&
+                    wouldHaveZeroResidual(ctx, refFrame_, skipMvVal[0],
+                                          skipMvVal[1], qpRunning);
+      if (isSkip) {
+        encodeMacroblockPSkip(ctx, refFrame_, qpRunning);
+        pendingSkipRun++;
+        continue;
+      }
+
+      // Not skip: decide between an Intra-macroblock fallback (clause
+      // 7.3.5's mb_type >= 5) and P_L0_16x16 - see
+      // shouldUseIntraInPSlice()'s own comment (h264_macroblock_encode_inter.h)
+      // for the heuristic. chooseIntra16x16Mode() is a real trial (same
+      // "harmless either way" reasoning as encodeIFrame()'s own I_16x16-
+      // vs-I_4x4 decision above: its prediction write into ctx.frame gets
+      // naturally overwritten by whichever real path runs next).
+      bool leftAvail = mbInfo_.leftAvailable(mbX, mbY, ctx.sliceId);
+      bool topAvail = mbInfo_.topAvailable(mbX, mbY, ctx.sliceId);
+      bool topLeftAvail = mbInfo_.topLeftAvailable(mbX, mbY, ctx.sliceId);
+      chooseIntra16x16Mode(ctx, leftAvail, topAvail, topLeftAvail);
+      int intraSad = sadLuma16x16(ctx);
+
+      sliceW.ue((uint32_t)pendingSkipRun);
+      pendingSkipRun = 0;
+
+      if (shouldUseIntraInPSlice(intraSad, interSad)) {
+        if (shouldUseIntra4x4(ctx, intraSad)) {
+          qpRunning = encodeMacroblockIntra4x4(sliceW, ctx, qpRunning, qp,
+                                                /*mbTypeOffset=*/5);
+        } else {
+          qpRunning = encodeMacroblockIntra16x16(sliceW, ctx, qpRunning, qp,
+                                                  /*mbTypeOffset=*/5);
+        }
+      } else {
+        qpRunning = encodeMacroblockInter16x16(sliceW, ctx, refFrame_,
+                                                bestMv[0], bestMv[1],
+                                                qpRunning, qp);
+      }
+      if (sliceW.error()) return 0;
+    }
+    // Trailing skip run: matches decode's slice_data() loop, which exits
+    // once mbAddr reaches totalMbs *inside* the skip-processing block,
+    // before ever reading another mb_skip_run/macroblock_layer() - so a
+    // picture ending in skips needs exactly one final mb_skip_run and
+    // nothing after it.
+    if (pendingSkipRun > 0) sliceW.ue((uint32_t)pendingSkipRun);
+
+    sliceW.rbspTrailingBits();
+    if (sliceW.error()) return 0;
+
+    size_t o = writeNalUnit(dst, dstCapacity, /*nalRefIdc=*/3,
+                             kNalSliceNonIdr, sliceScratch_,
+                             sliceW.bytesWritten());
+    if (o == 0) return 0;
+
+    Pps pps;
+    pps.chromaQpIndexOffset = 0;
+    deblockPicture(frame_, mbInfo_, pps);
+
+    refFrame_.copyFrom(frame_);
+    frameNum_ = (frameNum_ + 1) & 0xFF;  // 8 bits (log2_max_frame_num_minus4==4)
+
+    updateRateControl(o);
+    return o;
+  }
+
+  /// Same as encodeIFrame(), for RGB888 source data - converts into this
+  /// class's own YUV420 scratch buffers (see convertRgb888ToYuv420(),
+  /// h264_color_convert.h) before delegating to encodeIFrame().
+  size_t encodeIFrameRgb888(const uint8_t* rgb, int rgbStride, int width,
+                             int height, int qp, uint8_t* dst,
+                             size_t dstCapacity) {
+    if (!prepareYuvScratch(width, height)) return 0;
+    convertRgb888ToYuv420(rgb, rgbStride, width, height, yuvY_.data(), width, yuvU_.data(),
+                           yuvV_.data(), width / 2);
+    return encodeIFrame(yuvY_.data(), width, yuvU_.data(), yuvV_.data(), width / 2, width, height,
+                         qp, dst, dstCapacity);
+  }
+
+  /// Same as encodeIFrame(), for RGB666 source data.
+  size_t encodeIFrameRgb666(const uint8_t* rgb666, int rgbStride, int width,
+                             int height, int qp, uint8_t* dst,
+                             size_t dstCapacity) {
+    if (!prepareYuvScratch(width, height)) return 0;
+    convertRgb666ToYuv420(rgb666, rgbStride, width, height, yuvY_.data(), width,
+                           yuvU_.data(), yuvV_.data(), width / 2);
+    return encodeIFrame(yuvY_.data(), width, yuvU_.data(), yuvV_.data(), width / 2, width, height,
+                         qp, dst, dstCapacity);
+  }
+
+  /// Same as encodeIFrame(), for RGB565 source data.
+  size_t encodeIFrameRgb565(const uint16_t* rgb565, int rgbStride, int width,
+                             int height, int qp, uint8_t* dst,
+                             size_t dstCapacity) {
+    if (!prepareYuvScratch(width, height)) return 0;
+    convertRgb565ToYuv420(rgb565, rgbStride, width, height, yuvY_.data(), width,
+                           yuvU_.data(), yuvV_.data(), width / 2);
+    return encodeIFrame(yuvY_.data(), width, yuvU_.data(), yuvV_.data(), width / 2, width, height,
+                         qp, dst, dstCapacity);
+  }
+
+  /// Same as encodeIFrame(), for YUYV-order packed YUV 4:2:2 source data.
+  size_t encodeIFrameYuv422(const uint8_t* yuyv, int yuyvStride, int width,
+                             int height, int qp, uint8_t* dst,
+                             size_t dstCapacity) {
+    if (!prepareYuvScratch(width, height)) return 0;
+    convertYuyv422ToYuv420(yuyv, yuyvStride, width, height, yuvY_.data(), width,
+                            yuvU_.data(), yuvV_.data(), width / 2);
+    return encodeIFrame(yuvY_.data(), width, yuvU_.data(), yuvV_.data(), width / 2, width, height,
+                         qp, dst, dstCapacity);
+  }
+
+  /// Same as encodePFrame(), for RGB888 source data (see
+  /// encodeIFrameRgb888()'s own comment for the format/conversion
+  /// details - identical here, just against the established sequence's
+  /// dimensions instead of a width/height parameter).
+  size_t encodePFrameRgb888(const uint8_t* rgb, int rgbStride, int qp,
+                             uint8_t* dst, size_t dstCapacity) {
+    if (!haveReference_ || !prepareYuvScratch(width_, height_)) return 0;
+    convertRgb888ToYuv420(rgb, rgbStride, width_, height_, yuvY_.data(),
+                           width_, yuvU_.data(), yuvV_.data(), width_ / 2);
+    return encodePFrame(yuvY_.data(), width_, yuvU_.data(), yuvV_.data(),
+                         width_ / 2, qp, dst, dstCapacity);
+  }
+
+  /// Same as encodePFrame(), for RGB666 source data.
+  size_t encodePFrameRgb666(const uint8_t* rgb666, int rgbStride, int qp,
+                             uint8_t* dst, size_t dstCapacity) {
+    if (!haveReference_ || !prepareYuvScratch(width_, height_)) return 0;
+    convertRgb666ToYuv420(rgb666, rgbStride, width_, height_, yuvY_.data(),
+                           width_, yuvU_.data(), yuvV_.data(), width_ / 2);
+    return encodePFrame(yuvY_.data(), width_, yuvU_.data(), yuvV_.data(),
+                         width_ / 2, qp, dst, dstCapacity);
+  }
+
+  /// Same as encodePFrame(), for RGB565 source data.
+  size_t encodePFrameRgb565(const uint16_t* rgb565, int rgbStride, int qp,
+                             uint8_t* dst, size_t dstCapacity) {
+    if (!haveReference_ || !prepareYuvScratch(width_, height_)) return 0;
+    convertRgb565ToYuv420(rgb565, rgbStride, width_, height_, yuvY_.data(),
+                           width_, yuvU_.data(), yuvV_.data(), width_ / 2);
+    return encodePFrame(yuvY_.data(), width_, yuvU_.data(), yuvV_.data(),
+                         width_ / 2, qp, dst, dstCapacity);
+  }
+
+  /// Same as encodePFrame(), for YUYV-order packed YUV 4:2:2 source data.
+  size_t encodePFrameYuv422(const uint8_t* yuyv, int yuyvStride, int qp,
+                             uint8_t* dst, size_t dstCapacity) {
+    if (!haveReference_ || !prepareYuvScratch(width_, height_)) return 0;
+    convertYuyv422ToYuv420(yuyv, yuyvStride, width_, height_, yuvY_.data(),
+                            width_, yuvU_.data(), yuvV_.data(), width_ / 2);
+    return encodePFrame(yuvY_.data(), width_, yuvU_.data(), yuvV_.data(),
+                         width_ / 2, qp, dst, dstCapacity);
+  }
+
+  /// The auto I/P dispatcher every public encodeFrame()-family method
+  /// resolves its stored defaults and delegates to: I-frame when
+  /// needsKeyframe() says so, P-frame otherwise. Not a new encoding path
+  /// of its own - purely a dispatch layer over the private
+  /// encodeIFrame()/encodePFrame() above.
+  size_t encodeFrameExplicit(const uint8_t* srcY, int srcStrideY,
+                              const uint8_t* srcU, const uint8_t* srcV,
+                              int srcStrideC, int width, int height, int qp,
+                              uint8_t* dst, size_t dstCapacity) {
+    if (needsKeyframe(width, height)) {
+      size_t n = encodeIFrame(srcY, srcStrideY, srcU, srcV, srcStrideC, width,
+                               height, qp, dst, dstCapacity);
+      if (n > 0) framesSinceKeyframe_ = 0;
+      return n;
+    }
+    size_t n = encodePFrame(srcY, srcStrideY, srcU, srcV, srcStrideC, qp, dst,
+                             dstCapacity);
+    if (n > 0) framesSinceKeyframe_++;
+    return n;
+  }
+
+  /// Same dispatch as encodeFrameExplicit(), for RGB888 source data.
+  size_t encodeFrameRgb888Explicit(const uint8_t* rgb, int rgbStride,
+                                    int width, int height, int qp,
+                                    uint8_t* dst, size_t dstCapacity) {
+    if (needsKeyframe(width, height)) {
+      size_t n = encodeIFrameRgb888(rgb, rgbStride, width, height, qp, dst,
+                                     dstCapacity);
+      if (n > 0) framesSinceKeyframe_ = 0;
+      return n;
+    }
+    size_t n = encodePFrameRgb888(rgb, rgbStride, qp, dst, dstCapacity);
+    if (n > 0) framesSinceKeyframe_++;
+    return n;
+  }
+
+  /// Same dispatch as encodeFrameExplicit(), for RGB666 source data.
+  size_t encodeFrameRgb666Explicit(const uint8_t* rgb666, int rgbStride,
+                                    int width, int height, int qp,
+                                    uint8_t* dst, size_t dstCapacity) {
+    if (needsKeyframe(width, height)) {
+      size_t n = encodeIFrameRgb666(rgb666, rgbStride, width, height, qp, dst,
+                                     dstCapacity);
+      if (n > 0) framesSinceKeyframe_ = 0;
+      return n;
+    }
+    size_t n = encodePFrameRgb666(rgb666, rgbStride, qp, dst, dstCapacity);
+    if (n > 0) framesSinceKeyframe_++;
+    return n;
+  }
+
+  /// Same dispatch as encodeFrameExplicit(), for RGB565 source data.
+  size_t encodeFrameRgb565Explicit(const uint16_t* rgb565, int rgbStride,
+                                    int width, int height, int qp,
+                                    uint8_t* dst, size_t dstCapacity) {
+    if (needsKeyframe(width, height)) {
+      size_t n = encodeIFrameRgb565(rgb565, rgbStride, width, height, qp, dst,
+                                     dstCapacity);
+      if (n > 0) framesSinceKeyframe_ = 0;
+      return n;
+    }
+    size_t n = encodePFrameRgb565(rgb565, rgbStride, qp, dst, dstCapacity);
+    if (n > 0) framesSinceKeyframe_++;
+    return n;
+  }
+
+  /// Same dispatch as encodeFrameExplicit(), for YUYV-order packed YUV
+  /// 4:2:2 source data.
+  size_t encodeFrameYuv422Explicit(const uint8_t* yuyv, int yuyvStride,
+                                    int width, int height, int qp,
+                                    uint8_t* dst, size_t dstCapacity) {
+    if (needsKeyframe(width, height)) {
+      size_t n = encodeIFrameYuv422(yuyv, yuyvStride, width, height, qp, dst,
+                                     dstCapacity);
+      if (n > 0) framesSinceKeyframe_ = 0;
+      return n;
+    }
+    size_t n = encodePFrameYuv422(yuyv, yuyvStride, qp, dst, dstCapacity);
+    if (n > 0) framesSinceKeyframe_++;
+    return n;
+  }
+
+  /// Whether encodeFrameExplicit() (or one of its color-format siblings)
+  /// should produce an I-frame for a `width`x`height` picture right now -
+  /// see encodeFrame()'s own doc comment for the three cases (no
+  /// reference yet, a resolution change, or a configured keyframe
+  /// interval elapsed). `keyframeInterval_` is a GOP size (the standard
+  /// meaning, e.g. ffmpeg's `-g`): keyframes land exactly
+  /// `keyframeInterval_` frames apart (0, N, 2N, ... for
+  /// `keyframeInterval_ == N`), not N+1 - `framesSinceKeyframe_` counts
+  /// P-frames encoded since the last keyframe, so the Nth P-frame (index
+  /// N-1, since counting starts at 0 for the first P-frame after a
+  /// keyframe) is the last one before the next keyframe is due; comparing
+  /// against `keyframeInterval_ - 1` (not `keyframeInterval_`) is what
+  /// gets the spacing exactly right - verified against a real
+  /// encodeFrame()-only sequence in test/native/test_encode_autoframe.cpp
+  /// (keyframeInterval 3 landing keyframes at picture 0, 3, 6, 9, not
+  /// 0, 4, 8).
+  bool needsKeyframe(int width, int height) const {
+    if (!haveReference_ || width != width_ || height != height_) return true;
+    return keyframeInterval_ > 0 &&
+           framesSinceKeyframe_ >= keyframeInterval_ - 1;
+  }
+
+  /// Bounds-checks width/height (the same H264_MAX_WIDTH/H264_MAX_HEIGHT
+  /// budget encodeIFrame() itself checks) and lazily allocates
+  /// yuvY_/yuvU_/yuvV_ at their maximum size on first use - shared by
+  /// every encodeIFrame*() color-conversion overload above. Unlike
+  /// sliceScratch_ (always needed, so always a plain fixed array),
+  /// yuvY_/yuvU_/yuvV_ back a set of *optional* convenience overloads -
+  /// callers who only ever use the plain YUV-planes encodeFrame()
+  /// shouldn't unconditionally pay ~38KB of static RAM for conversion
+  /// buffers they never touch. Same one-time-allocate-then-reuse idiom as
+  /// Frame::ensureAllocated() (h264_frame.h): a `std::vector<uint8_t,
+  /// Allocator>` resized once, not a per-call allocation in the hot path,
+  /// and using the same Allocator template parameter so it can be placed
+  /// in PSRAM alongside frame_ on boards that have it.
+  bool prepareYuvScratch(int width, int height) {
+    if (width <= 0 || height <= 0 || (width % 16) != 0 ||
+        (height % 16) != 0) {
+      return false;
+    }
+    if (width > H264_MAX_WIDTH || height > H264_MAX_HEIGHT) return false;
+    ensureYuvScratchAllocated();
+    return true;
+  }
+
+  /// The allocation half of prepareYuvScratch() above, split out so
+  /// begin() can also trigger it eagerly (see begin()'s own comment)
+  /// without duplicating the resize logic or its width/height validation
+  /// (irrelevant when called from begin(), which has no picture yet).
+  void ensureYuvScratchAllocated() {
+    if (!yuvY_.empty()) return;
+    yuvY_.resize((size_t)H264_MAX_WIDTH * H264_MAX_HEIGHT);
+    yuvU_.resize((size_t)(H264_MAX_WIDTH / 2) * (H264_MAX_HEIGHT / 2));
+    yuvV_.resize((size_t)(H264_MAX_WIDTH / 2) * (H264_MAX_HEIGHT / 2));
+  }
+
+  /// Resolves the `qp` an encodeIFrame()/encodePFrame() call should
+  /// actually use: a real 0-51 value passes through unchanged (and is
+  /// remembered for lastQp()); `-1` requests rate control, replaced with
+  /// the current `adaptiveQp_` estimate (must have been primed by
+  /// setTargetBitrate() first - `targetFrameBytes_ <= 0` means it never
+  /// was, so this fails rather than silently encoding at a meaningless
+  /// default). Returns false (nothing written to `*qp`, caller should
+  /// fail the whole encode call) for any other invalid value.
+  bool resolveQp(int* qp) {
+    if (*qp == -1) {
+      if (targetFrameBytes_ <= 0) return false;
+      *qp = adaptiveQp_;
+    } else if (*qp < 0 || *qp > 51) {
+      return false;
+    }
+    lastQp_ = *qp;
+    return true;
+  }
+
+  /// Rate control's feedback step, run after every frame actually
+  /// encoded with `qp = -1` (encodeIFrame()/encodePFrame() call this
+  /// unconditionally - it's a no-op when rate control was never
+  /// configured, `targetFrameBytes_ <= 0`, so an explicit-QP caller pays
+  /// nothing for this). A hysteresis-banded proportional controller:
+  /// `actualBytes` well over target nudges `adaptiveQp_` up (coarser,
+  /// smaller future frames), well under nudges it down; small errors
+  /// (within 10% of target) are left alone rather than chasing every
+  /// frame's natural content-driven size variation, and the per-frame
+  /// step is capped at +/-2 QP to avoid visible quality oscillation from
+  /// one frame to the next - both are real, if not empirically-optimal-
+  /// tuned-against-a-rate-distortion-curve, choices consistent with this
+  /// encoder's whole "simple and real-time-appropriate, not maximally
+  /// efficient" design center (same spirit as shouldUseIntra4x4()'s
+  /// kI4x4Bias, h264_macroblock_encode.h). Verified empirically (not
+  /// just "does it compile") against a real multi-frame sequence - see
+  /// test/native/test_encode_ratecontrol.cpp - that actual total output
+  /// size converges toward the configured target over a handful of
+  /// frames rather than diverging or oscillating without bound.
+  void updateRateControl(size_t actualBytes) {
+    if (targetFrameBytes_ <= 0) return;
+    int64_t error = (int64_t)actualBytes - targetFrameBytes_;
+    int step = 0;
+    if (error > targetFrameBytes_ / 4) {
+      step = 2;
+    } else if (error > targetFrameBytes_ / 10) {
+      step = 1;
+    } else if (error < -targetFrameBytes_ / 4) {
+      step = -2;
+    } else if (error < -targetFrameBytes_ / 10) {
+      step = -1;
+    }
+    adaptiveQp_ += step;
+    if (adaptiveQp_ < 0) adaptiveQp_ = 0;
+    if (adaptiveQp_ > 51) adaptiveQp_ = 51;
+  }
+
+  Frame<Allocator> frame_;
+  MbInfoTable mbInfo_;
+  uint8_t sliceScratch_[H264_MAX_NAL_SIZE];
+  std::vector<uint8_t, Allocator> yuvY_;
+  std::vector<uint8_t, Allocator> yuvU_;
+  std::vector<uint8_t, Allocator> yuvV_;
+
+  // P-frame state: the single reference picture (this milestone's only
+  // reference - see h264_macroblock_encode_inter.h), whether one exists
+  // yet (encodePFrame() refuses to run without it), the frame_num to use
+  // for the *next* encodePFrame() call, the picture dimensions
+  // established by the last encodeIFrame() call (encodePFrame() has no
+  // dimensions of its own), and the QP writePpsRbsp() was originally
+  // called with (writeSliceHeaderP() needs it to compute slice_qp_delta).
+  Frame<Allocator> refFrame_;
+  bool haveReference_ = false;
+  int frameNum_ = 0;
+  int width_ = 0, height_ = 0;
+  int ppsBaseQp_ = 0;
+
+  // Rate control state (see setTargetBitrate()/resolveQp()/
+  // updateRateControl()): targetFrameBytes_ <= 0 means "not configured,
+  // qp = -1 is refused"; adaptiveQp_ is the running QP estimate, adjusted
+  // after each rate-controlled frame; lastQp_ records whatever QP the
+  // most recent call actually used (explicit or rate-controlled) for
+  // lastQp()'s benefit.
+  int targetFrameBytes_ = 0;
+  int adaptiveQp_ = 26;
+  int lastQp_ = 26;
+
+  // Automatic keyframe state for encodeFrame() (see needsKeyframe()/
+  // setKeyframeInterval()): keyframeInterval_ <= 0 means "never insert a
+  // periodic keyframe" (the default - encodeFrame() still always re-keys
+  // on a fresh sequence or a resolution change, those aren't optional).
+  int keyframeInterval_ = 0;
+  int framesSinceKeyframe_ = 0;
+
+  // Defaults for the public encodeFrame()-family methods (see
+  // setStride()/setPackedStride()/setQp()): defaultStrideY_/
+  // defaultStrideC_/defaultPackedStride_ <= 0 means "derive a tightly-
+  // packed stride from width_ instead" (the common no-row-padding case);
+  // defaultQp_ == -1 means "use rate control" (encodeIFrame()/
+  // encodePFrame()'s own existing qp == -1 meaning, so this needs no
+  // separate sentinel). width_/height_ themselves (see setSize()) reuse
+  // the fields already declared above rather than duplicating them here.
+  int defaultStrideY_ = -1;
+  int defaultStrideC_ = -1;
+  int defaultPackedStride_ = -1;
+  int defaultQp_ = -1;
+};
+
+}  // namespace tinyh264
