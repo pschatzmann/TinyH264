@@ -71,6 +71,41 @@ class Decoder {
   int maxRefFrames() const { return maxRefFrames_; }
 
   /**
+   * Overrides the H264_MAX_WIDTH/H264_MAX_HEIGHT compile-time defaults
+   * (h264_config.h) for this Decoder instance's own picture-buffer and
+   * per-macroblock-metadata allocation ceiling - an alternative to a
+   * `#define H264_MAX_WIDTH ...`/`#define H264_MAX_HEIGHT ...` before
+   * `#include`ing this header, for callers that would rather configure
+   * this at runtime (e.g. once in setup()) than via the preprocessor.
+   * Propagates to curFrame_, every H264_MAX_REF_FRAMES reference slot,
+   * and the macroblock metadata table (see Frame::setMaxDimension()/
+   * MbInfoTable::setMaxDimension()) - not just a smaller bound, either
+   * direction works, since nothing downstream of this assumes a fixed
+   * compile-time size anymore (H264_MAX_REF_FRAMES, sizing the fixed
+   * `refFrames_` array itself, and H264_MAX_NAL_SIZE are the only
+   * remaining genuinely compile-time-fixed limits). A stream whose SPS
+   * declares a resolution bigger than this ceiling is rejected as
+   * kUnsupported (see next()'s SPS handling below), same as exceeding
+   * the old compile-time H264_MAX_WIDTH/H264_MAX_HEIGHT always was. If
+   * picture buffers are already allocated, this releases and reclaims
+   * them so the next decode reallocates at the new size - safe to call
+   * at any time, not just before the first decode.
+   */
+  void setMaxDimension(int maxWidth, int maxHeight) {
+    maxWidth_ = maxWidth;
+    maxHeight_ = maxHeight;
+    curFrame_.setMaxDimension(maxWidth, maxHeight);
+    for (int i = 0; i < H264_MAX_REF_FRAMES; i++) {
+      refFrames_[i].setMaxDimension(maxWidth, maxHeight);
+    }
+    mbInfo_.setMaxDimension(maxWidth, maxHeight);
+  }
+  /// The current allocation-ceiling width - see setMaxDimension().
+  int maxWidth() const { return maxWidth_; }
+  /// The current allocation-ceiling height - see setMaxDimension().
+  int maxHeight() const { return maxHeight_; }
+
+  /**
    * Feeds one full Annex-B buffer (as many NAL units as are in it) and
    * decodes NAL units one at a time via next(). Call setInput() again
    * (with the next chunk, or a new stream) once inputExhausted() is true;
@@ -106,8 +141,8 @@ class Decoder {
       Sps sps;
       if (!parseSps(br, &sps)) return DecodeStatus::kError;
       if (sps.unsupported) return DecodeStatus::kUnsupported;
-      if (sps.codedWidth > H264_MAX_WIDTH ||
-          sps.codedHeight > H264_MAX_HEIGHT) {
+      if (sps.codedWidth > (uint32_t)maxWidth_ ||
+          sps.codedHeight > (uint32_t)maxHeight_) {
         return DecodeStatus::kUnsupported;
       }
       spsTable_[sps.id % H264_MAX_SPS] = sps;
@@ -141,8 +176,8 @@ class Decoder {
 
   /**
    * Reserves this decoder's picture buffers (curFrame_ plus all
-   * H264_MAX_REF_FRAMES reference slots, each up to their compile-time
-   * H264_MAX_WIDTH x H264_MAX_HEIGHT maximum - see h264_frame.h) up
+   * H264_MAX_REF_FRAMES reference slots, each up to their maxWidth()/
+   * maxHeight() maximum - see setMaxDimension()/h264_frame.h) up
    * front, instead of the default allocate-on-first-decode behavior
    * (Frame::ensureAllocated(), otherwise first triggered by the first
    * picture next() actually decodes). Entirely optional - next() still
@@ -166,8 +201,8 @@ class Decoder {
    * SPS/PPS presence, reference-picture bookkeeping, input-exhaustion
    * flag) back to how a freshly constructed Decoder starts - the
    * counterpart to begin(), for callers that want to reclaim this
-   * decoder's resident memory (several times H264_MAX_WIDTH x
-   * H264_MAX_HEIGHT - see h264_frame.h) before starting an unrelated
+   * decoder's resident memory (several times maxWidth() x maxHeight() -
+   * see h264_frame.h) before starting an unrelated
    * stream, or before doing something else memory-hungry, rather than
    * keeping it allocated for the rest of the program's lifetime. Not
    * required before destruction - the members' own destructors free
@@ -370,6 +405,8 @@ class Decoder {
   int refFrameCount_ = 0;  ///< how many of refFrames_[] are currently valid (0..maxRefFrames_)
   int maxRefFrames_ = H264_MAX_REF_FRAMES;  ///< runtime-active cap, see setMaxRefFrames()
   int sliceCount_ = 0;         ///< slices seen so far in the current picture, doubles as the next sliceId
+  int maxWidth_ = H264_MAX_WIDTH;    ///< allocation-ceiling width, see setMaxDimension()
+  int maxHeight_ = H264_MAX_HEIGHT;  ///< allocation-ceiling height, see setMaxDimension()
 };
 
 }  // namespace tinyh264

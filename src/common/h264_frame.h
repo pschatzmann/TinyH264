@@ -8,8 +8,10 @@
 /*
  * Header-only. A single YUV 4:2:0 planar picture buffer, MB-aligned
  * (coded_width x coded_height, both multiples of 16), sized up to
- * H264_MAX_WIDTH x H264_MAX_HEIGHT; see h264_config.h for the memory
- * budget this implies.
+ * maxWidth x maxHeight (default H264_MAX_WIDTH/H264_MAX_HEIGHT, see
+ * h264_config.h for the memory budget those imply - overridable per
+ * Decoder/Encoder instance via setMaxDimension(), see h264_decoder.h/
+ * h264_encoder.h).
  *
  * Y, U, and V live in *three separate* std::vector<uint8_t, Allocator>
  * buffers rather than one merged contiguous allocation. A merged buffer
@@ -53,17 +55,30 @@ namespace tinyh264 {
 template <typename Allocator = std::allocator<uint8_t>>
 struct Frame {
   /**
-   * Upper bound on the luma plane's element count, from the compile-time
-   * H264_MAX_WIDTH/H264_MAX_HEIGHT budget in h264_config.h.
+   * Allocation ceiling this Frame's buffers are sized to, in luma
+   * samples - defaults to the compile-time H264_MAX_WIDTH/
+   * H264_MAX_HEIGHT (h264_config.h), overridable per instance via
+   * setMaxDimension() before first use. Not a hard limit enforced
+   * anywhere in this struct itself (nothing here still assumes a
+   * compile-time-fixed size) - Decoder/Encoder are what actually reject
+   * a picture bigger than this, via their own maxWidth_/maxHeight_.
    */
-  static const int kMaxLumaSize = H264_MAX_WIDTH * H264_MAX_HEIGHT;
+  int maxWidth = H264_MAX_WIDTH;
+  int maxHeight = H264_MAX_HEIGHT;
+
   /**
-   * Upper bound on each chroma plane's element count (quarter-resolution
-   * luma, per 4:2:0 subsampling).
+   * Overrides maxWidth/maxHeight for this Frame's own allocation size -
+   * see Decoder::setMaxDimension()/Encoder::setMaxDimension() for the
+   * usual entry point (which propagates here). If buffers are already
+   * allocated, releases them first so the *next* ensureAllocated() call
+   * picks up the new size, rather than silently keeping the old one -
+   * safe to call at any time, not just before first use.
    */
-  static const int kMaxChromaSize = (H264_MAX_WIDTH / 2) * (H264_MAX_HEIGHT / 2);
-  /// Upper bound on the combined Y+U+V byte count (for memory-budget docs only - not one allocation, see dataY/dataU/dataV below).
-  static const int kMaxTotalSize = kMaxLumaSize + 2 * kMaxChromaSize;
+  void setMaxDimension(int w, int h) {
+    maxWidth = w;
+    maxHeight = h;
+    if (!dataY.empty()) release();
+  }
 
   /**
    * Y, U, and V samples, each its own separate allocation (unlike a
@@ -86,17 +101,17 @@ struct Frame {
   bool isReference = false; ///< true if this picture was coded with nal_ref_idc != 0
 
   /**
-   * Allocates the three backing buffers at their maximum
-   * (H264_MAX_WIDTH x H264_MAX_HEIGHT-derived) sizes if not already
-   * done. Safe to call more than once (e.g. once per setSize()); a
-   * no-op after the first call, so it never re-allocates in the
-   * per-frame decode hot path.
+   * Allocates the three backing buffers at their maximum (maxWidth x
+   * maxHeight-derived, see setMaxDimension()) sizes if not already done.
+   * Safe to call more than once (e.g. once per setSize()); a no-op after
+   * the first call, so it never re-allocates in the per-frame decode hot
+   * path.
    */
   void ensureAllocated() {
     if (!dataY.empty()) return;
-    dataY.resize(kMaxLumaSize);
-    dataU.resize(kMaxChromaSize);
-    dataV.resize(kMaxChromaSize);
+    dataY.resize((size_t)maxWidth * maxHeight);
+    dataU.resize((size_t)(maxWidth / 2) * (maxHeight / 2));
+    dataV.resize((size_t)(maxWidth / 2) * (maxHeight / 2));
   }
 
   /**
@@ -117,9 +132,9 @@ struct Frame {
    * Releases the three backing buffers back to the allocator (clear() +
    * shrink_to_fit() each) and resets dimensions to zero - the
    * counterpart to ensureAllocated()/setSize(), for callers that want to
-   * reclaim this picture's ~38KB+ (H264_MAX_WIDTH x H264_MAX_HEIGHT-
-   * sized) buffers when done decoding/encoding instead of leaving them
-   * resident for the rest of the program's lifetime. setSize() (via
+   * reclaim this picture's ~38KB+ (maxWidth x maxHeight-sized) buffers
+   * when done decoding/encoding instead of leaving them resident for the
+   * rest of the program's lifetime. setSize() (via
    * ensureAllocated()) reallocates on the next use, same as before this
    * Frame's first setSize() call.
    */
@@ -185,13 +200,13 @@ struct Frame {
  * Packs a Frame's Y/U/V planes into one tightly-packed, contiguous
  * buffer - standard "I420" layout (Y bytes, then U bytes, then V bytes),
  * sized to this picture's *actual* width/height, no row padding. Frame's
- * own internal storage is already one contiguous allocation (see the
- * struct comment above), but at fixed offsets sized to the compile-time
- * H264_MAX_WIDTH/HEIGHT maximum, not this picture's actual dimensions -
- * so it can't just be handed out directly in general (there could be a
- * gap between the actual Y data and where U starts, if the compile-time
- * maximum is larger than this stream's real resolution). This produces
- * a minimally-sized, portable copy instead, the same role h264_rgb.h's
+ * own internal dataY/dataU/dataV are 3 separate allocations (see the
+ * struct comment above), each sized to maxWidth/maxHeight, not this
+ * picture's actual dimensions - so they can't just be handed out
+ * directly as one packed buffer in general (dataY itself may be larger
+ * than width*height if maxWidth/maxHeight exceeds this stream's real
+ * resolution). This produces a minimally-sized, portable copy instead,
+ * the same role h264_rgb.h's
  * converters play for their output formats - see
  * TinyH264Decoder::toYUV420() for the public-API wrapper. `dst` must
  * have room for width*height + 2*(width/2)*(height/2) uint8_t entries;

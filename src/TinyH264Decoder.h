@@ -92,6 +92,25 @@ class TinyH264Decoder {
   int maxRefFrames() const { return decoder_.maxRefFrames(); }
 
   /**
+   * Runtime alternative to `#define H264_MAX_WIDTH ...`/`#define
+   * H264_MAX_HEIGHT ...` before `#include`ing this header - overrides
+   * the picture-buffer/metadata-table allocation ceiling for this
+   * decoder instance (see Decoder::setMaxDimension(), h264_decoder.h,
+   * for the full explanation). A stream whose SPS declares a resolution
+   * bigger than this is rejected as kUnsupported. Call before the first
+   * decode to size buffers for your actual content up front instead of
+   * the compile-time H264_MAX_WIDTH/H264_MAX_HEIGHT default (h264_config.h) -
+   * e.g. `decoder.setMaxDimension(256, 192);` in setup().
+   */
+  void setMaxDimension(int maxWidth, int maxHeight) {
+    decoder_.setMaxDimension(maxWidth, maxHeight);
+  }
+  /// The current allocation-ceiling width - see setMaxDimension().
+  int maxWidth() const { return decoder_.maxWidth(); }
+  /// The current allocation-ceiling height - see setMaxDimension().
+  int maxHeight() const { return decoder_.maxHeight(); }
+
+  /**
    * Reserves this decoder's picture buffers up front instead of the
    * default allocate-on-first-decode behavior - see Decoder::begin()'s
    * own comment (decoder/h264_decoder.h) for exactly what this does and

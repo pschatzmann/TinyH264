@@ -279,6 +279,50 @@ class Encoder {
   void setQp(int qp) { defaultQp_ = qp; }
 
   /**
+   * Overrides the H264_MAX_WIDTH/H264_MAX_HEIGHT compile-time defaults
+   * (h264_config.h) for this Encoder instance's own picture-buffer,
+   * per-macroblock-metadata, and color-conversion-scratch allocation
+   * ceiling - an alternative to a `#define H264_MAX_WIDTH ...`/
+   * `#define H264_MAX_HEIGHT ...` before `#include`ing this header, for
+   * callers that would rather configure this at runtime (e.g. once in
+   * setup()) than via the preprocessor. Propagates to frame_, refFrame_,
+   * the macroblock metadata table (see Frame::setMaxDimension()/
+   * MbInfoTable::setMaxDimension()), and - if already allocated - the
+   * yuvY_/yuvU_/yuvV_ color-conversion scratch buffers, released here so
+   * ensureYuvScratchAllocated() reallocates them at the new size on next
+   * use (it reads maxWidth_/maxHeight_ directly, so this is the only
+   * propagation they need). Not just a smaller bound, either direction
+   * works, since nothing downstream of
+   * this assumes a fixed compile-time size anymore (H264_MAX_NAL_SIZE is
+   * the only remaining genuinely compile-time-fixed limit here). A
+   * setSize()/encodeFrame() call for a picture bigger than this ceiling
+   * fails and returns 0, same as exceeding the old compile-time
+   * H264_MAX_WIDTH/H264_MAX_HEIGHT always did. If picture buffers are
+   * already allocated, this releases and reclaims them so the next
+   * encode reallocates at the new size - safe to call at any time, not
+   * just before the first encode.
+   */
+  void setMaxDimension(int maxWidth, int maxHeight) {
+    maxWidth_ = maxWidth;
+    maxHeight_ = maxHeight;
+    frame_.setMaxDimension(maxWidth, maxHeight);
+    refFrame_.setMaxDimension(maxWidth, maxHeight);
+    mbInfo_.setMaxDimension(maxWidth, maxHeight);
+    if (!yuvY_.empty()) {
+      yuvY_.clear();
+      yuvY_.shrink_to_fit();
+      yuvU_.clear();
+      yuvU_.shrink_to_fit();
+      yuvV_.clear();
+      yuvV_.shrink_to_fit();
+    }
+  }
+  /// The current allocation-ceiling width - see setMaxDimension().
+  int maxWidth() const { return maxWidth_; }
+  /// The current allocation-ceiling height - see setMaxDimension().
+  int maxHeight() const { return maxHeight_; }
+
+  /**
    * The most recently encoded picture, reconstructed exactly as decoding
    * the just-produced bitstream back would give (closed loop) - useful
    * for measuring this encoder's own quality (e.g. PSNR against the
@@ -288,8 +332,8 @@ class Encoder {
 
   /**
    * Reserves this encoder's picture buffers (frame_ and refFrame_, each
-   * up to their compile-time H264_MAX_WIDTH x H264_MAX_HEIGHT maximum -
-   * see h264_frame.h) up front, instead of the default allocate-on-
+   * up to their maxWidth()/maxHeight() maximum - see setMaxDimension()/
+   * h264_frame.h) up front, instead of the default allocate-on-
    * first-encode behavior (Frame::ensureAllocated(), otherwise first
    * triggered by the first encodeFrame() call). Pass
    * `reserveColorConversionScratch = true` to also reserve the
@@ -395,7 +439,7 @@ class Encoder {
     if (width <= 0 || height <= 0 || (width % 16) != 0 || (height % 16) != 0) {
       return 0;
     }
-    if (width > H264_MAX_WIDTH || height > H264_MAX_HEIGHT) return 0;
+    if (width > maxWidth_ || height > maxHeight_) return 0;
     if (!resolveQp(&qp)) return 0;
 
     frame_.setSize(width, height);
@@ -838,9 +882,9 @@ class Encoder {
   }
 
   /**
-   * Bounds-checks width/height (the same H264_MAX_WIDTH/H264_MAX_HEIGHT
-   * budget encodeIFrame() itself checks) and lazily allocates
-   * yuvY_/yuvU_/yuvV_ at their maximum size on first use - shared by
+   * Bounds-checks width/height (the same maxWidth_/maxHeight_ budget
+   * encodeIFrame() itself checks - see setMaxDimension()) and lazily
+   * allocates yuvY_/yuvU_/yuvV_ at their maximum size on first use - shared by
    * every encodeIFrame*() color-conversion overload above. Unlike
    * sliceScratch_ (always needed, so always a plain fixed array),
    * yuvY_/yuvU_/yuvV_ back a set of *optional* convenience overloads -
@@ -857,7 +901,7 @@ class Encoder {
         (height % 16) != 0) {
       return false;
     }
-    if (width > H264_MAX_WIDTH || height > H264_MAX_HEIGHT) return false;
+    if (width > maxWidth_ || height > maxHeight_) return false;
     ensureYuvScratchAllocated();
     return true;
   }
@@ -870,9 +914,9 @@ class Encoder {
    */
   void ensureYuvScratchAllocated() {
     if (!yuvY_.empty()) return;
-    yuvY_.resize((size_t)H264_MAX_WIDTH * H264_MAX_HEIGHT);
-    yuvU_.resize((size_t)(H264_MAX_WIDTH / 2) * (H264_MAX_HEIGHT / 2));
-    yuvV_.resize((size_t)(H264_MAX_WIDTH / 2) * (H264_MAX_HEIGHT / 2));
+    yuvY_.resize((size_t)maxWidth_ * maxHeight_);
+    yuvU_.resize((size_t)(maxWidth_ / 2) * (maxHeight_ / 2));
+    yuvV_.resize((size_t)(maxWidth_ / 2) * (maxHeight_ / 2));
   }
 
   /**
@@ -992,6 +1036,9 @@ class Encoder {
   int defaultStrideC_ = -1;
   int defaultPackedStride_ = -1;
   int defaultQp_ = -1;
+
+  int maxWidth_ = H264_MAX_WIDTH;    ///< allocation-ceiling width, see setMaxDimension()
+  int maxHeight_ = H264_MAX_HEIGHT;  ///< allocation-ceiling height, see setMaxDimension()
 };
 
 }  // namespace tinyh264

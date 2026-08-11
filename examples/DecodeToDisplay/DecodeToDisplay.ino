@@ -15,12 +15,12 @@
  * requirement (2 picture buffers + the metadata table) plus this
  * sketch's own display objects exceeded real measured free heap. See
  * docs/memory-budget.md for the full picture-buffer budget model;
- * `#define H264_MAX_WIDTH`/`H264_MAX_HEIGHT` below override the
- * project-wide default for this sketch only (h264_config.h's `#ifndef`
- * guards support this per translation unit). If your board has PSRAM,
- * remove those two #defines and switch the decoder to
- * PSRAMAllocatorESP32<uint8_t> instead (see DecodeFromProgmemPSRAM) to
- * decode at full QVGA.
+ * decoder.setMaxDimension() in setup() below overrides the project-wide
+ * default for this sketch's decoder instance only, at runtime (an
+ * alternative to `#define H264_MAX_WIDTH`/`H264_MAX_HEIGHT` before the
+ * #include). If your board has PSRAM, remove that call and switch the
+ * decoder to PSRAMAllocatorESP32<uint8_t> instead (see
+ * DecodeFromProgmemPSRAM) to decode at full QVGA.
  *
  * Avoids a full-screen RGB565 framebuffer (one ~150KB+ contiguous
  * allocation, which a plain ESP32's split internal DRAM often can't
@@ -54,11 +54,6 @@
 #error \
     "DecodeToDisplay is ESP32-only (see the file header comment above) - it uses ESP32-Arduino's 4-argument SPI.begin() pin-remap API."
 #endif
-
-// Overrides the project-wide QVGA default for this sketch only - see
-// the file header comment above. Must precede the include below.
-#define H264_MAX_WIDTH 256
-#define H264_MAX_HEIGHT 192
 
 #include <TinyGPU.h>
 #include <TinyGPU/DisplayDriverSPI.h>
@@ -237,6 +232,10 @@ void setup() {
   tftDriver.begin();
   clearScreen();
   band.begin();
+
+  // See the file header comment: sizes buffers for kDisplayWidth x
+  // kDisplayHeight instead of the project-wide QVGA compile-time default.
+  decoder.setMaxDimension(kDisplayWidth, kDisplayHeight);
 
   // Required for the memory budget above: caps the decoder to 2 resident
   // picture buffers instead of the compile-time default of up to 4.

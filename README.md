@@ -15,7 +15,7 @@ via `arduino-cli` against `esp32:esp32:esp32`, `esp32:esp32:esp32s3`
 
 ## Performance
 
-Measured on real hardware, not estimated: QCIF (176x144), `examples/
+**Decoding:** Measured on real hardware, not estimated: QCIF (176x144), `examples/
 DecodeFromProgmem`'s built-in benchmark (30 repetitions of the embedded
 test clip, `micros()`-timed per frame - see that sketch for the
 methodology, including why the timing checkpoint is taken around, not
@@ -28,6 +28,15 @@ across, the `Serial` output).
 | RP2040 | 29008 us (34.5 fps) | 22700 us (44.1 fps) | 32263 us (31.0 fps) |
 | RP2350 | 26193 us (38.2 fps) | 19782 us (50.6 fps) | 29511 us (33.9 fps) |
 | STM32F723 | 13926 us (71.8 fps) | 11377 us (87.9 fps) | 15567 us (64.2 fps) |
+| x86 (native)* | 280 us (3569.8 fps) | 181 us (5524.3 fps) | 429 us (2328.7 fps) |
+
+\* Not a board - a native desktop build of the same decode path (no
+Arduino framework, `Serial`, or UART involved), same embedded clip and
+30-repetition loop, `std::chrono`-timed instead of `micros()`-timed.
+Measured on an Intel i7-4650U (single core, `-O2`). Included as a rough
+ceiling for how much of each embedded figure above is decode work versus
+that core's own overhead, not a fair apples-to-apples comparison with
+the boards above it.
 
 All comfortably clear real-time (15-30 fps) for QCIF at Baseline/CAVLC
 with the deblocking filter active. None of this decoder's hot paths
@@ -46,6 +55,32 @@ us/frame, ~8.9 fps if run back-to-back with no pacing delay. Slower than
 the QCIF-only figures above since it's 2.9x the pixel count *and*
 includes the display push, not just decode - see that sketch's own
 on-device timing instrumentation for the methodology.
+
+**Encoding**: QCIF (176x144), `examples/EncodeSyntheticFrame`'s built-in
+benchmark (30 repetitions of an 8-frame synthetic-gradient GOP,
+`micros()`-timed per frame, same methodology as the decode table above).
+Encoding is far more expensive than decoding - see
+[Future potential improvements](docs/future-improvements.md#encoding)
+for why (an exhaustive motion search) and what's been done/considered
+about it.
+
+| Board | avg | min | max |
+|---|---|---|---|
+| ESP32 | 600503 us (1.7 fps) | 256325 us (3.9 fps) | 721200 us (1.4 fps) |
+| ESP32-S3 | 486647 us (2.1 fps) | 205299 us (4.9 fps) | 584823 us (1.7 fps) |
+| RP2040* | 401440 us (2.5 fps) | 122553 us (8.2 fps) | 499529 us (2.0 fps) |
+| RP2350* | 808982 us (1.2 fps) | 303344 us (3.3 fps) | 983456 us (1.0 fps) |
+| STM32H750VBT6* | 88616 us (11.3 fps) | 15744 us (63.5 fps) | 114245 us (8.8 fps) |
+
+\* Built with the `-O3` ("Optimize Even More") board-menu option;
+ESP32/ESP32-S3 above use the Arduino-ESP32 core's fixed `-Os` (that core
+has no user-selectable optimization level), so those two rows aren't a
+like-for-like comparison with the `*` rows. The RP2350 figure being
+slower than RP2040 here is also suspect rather than a real chip
+comparison - RP2350's `arduino-pico` board defaults to a lower `CPU
+Speed` than RP2040's (150 MHz vs. 200 MHz) and has an ARM-vs-RISC-V
+`CPU Architecture` menu RP2040 doesn't even have, either of which could
+explain it; not yet root-caused.
 
 
 ## Containers
@@ -85,6 +120,11 @@ ffplay/mpv but not in a browser `<video>` tag.
 - [Testing](docs/testing.md) - running the native CMake/CTest suite,
   consuming this library as a CMake target or ESP-IDF component, and
   how the test assets themselves were generated.
+- [Future potential improvements](docs/future-improvements.md) - encoding
+  and decoding chapters covering motion-search performance findings
+  (what was optimized, what's still slow and why, options considered for
+  going further, and why ESP-DSP/CMSIS-DSP don't help this project's
+  targets for that workload), plus other known gaps.
 
 ## Installation
 

@@ -14,6 +14,7 @@
  * For a real application, feed encodeFrame() with real camera frames'
  * Y/U/V planes instead of the synthetic gradient below - the calling
  * pattern is identical either way.
+ *
  */
 
 #include <TinyH264Encoder.h>
@@ -93,6 +94,10 @@ void setup() {
   Serial.println("TinyH264Encoder EncodeSyntheticFrame example");
   printFreeHeap("Free heap before encode");
 
+  // See the file header comment: sizes buffers for this sketch's actual
+  // QCIF content instead of the project-wide compile-time default.
+  encoder.setMaxDimension(kWidth, kHeight);
+
   /*
    * Width/height/keyframe interval were already configured by the
    * constructor above; target bitrate (qp defaults to -1 - rate control -
@@ -155,7 +160,14 @@ void setup() {
       Serial.print(encodeUs);
       Serial.print(" us (");
       Serial.print(encodeUs > 0 ? 1000000.0f / encodeUs : 0.0f, 2);
-      Serial.println(" fps)");
+      Serial.print(" fps, running avg=");
+      if (frameCount > 1) {
+        uint32_t avgUs = (uint32_t)(totalEncodeUs / (uint32_t)(frameCount - 1));
+        Serial.print(avgUs > 0 ? 1000000.0f / avgUs : 0.0f, 2);
+        Serial.println(" fps)");
+      } else {
+        Serial.println("n/a)");
+      }
     }
   }
 

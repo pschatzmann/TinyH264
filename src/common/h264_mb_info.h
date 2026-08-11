@@ -96,31 +96,52 @@ struct MacroblockInfo {
  * has already been decoded *and* belongs to the same slice (so
  * prediction never reaches across an as-yet-undecoded or
  * differently-sliced macroblock). Backing storage is heap-allocated up
- * to H264_MAX_MBS entries, lazily on first reset() call, and never
- * resized again after that - the same allocate-once idiom
- * Frame::ensureAllocated() uses, for the same reason: at larger
- * resolutions (e.g. QVGA's 300 macroblocks, ~40KB of MacroblockInfo
- * alone) a *static* array member here overflows a plain ESP32's DRAM
- * .bss segment before the sketch even runs - confirmed by an actual
- * arduino-cli link failure, not just budget math, the same way the
- * original Frame overflow was found.
+ * to maxMbs_ entries (default H264_MAX_MBS, see setMaxDimension()),
+ * lazily on first reset() call, and never resized again after that
+ * (unless setMaxDimension() changes the ceiling) - the same
+ * allocate-once idiom Frame::ensureAllocated() uses, for the same
+ * reason: at larger resolutions (e.g. QVGA's 300 macroblocks, ~40KB of
+ * MacroblockInfo alone) a *static* array member here overflows a plain
+ * ESP32's DRAM .bss segment before the sketch even runs - confirmed by
+ * an actual arduino-cli link failure, not just budget math, the same
+ * way the original Frame overflow was found.
  */
 class MbInfoTable {
  public:
   /**
+   * Overrides the allocation ceiling (in pixels, not macroblocks -
+   * converted internally the same way H264_MAX_MBS itself is derived
+   * from H264_MAX_WIDTH/H264_MAX_HEIGHT in h264_config.h) for this
+   * table's backing storage - defaults to H264_MAX_MBS. Decoder::
+   * setMaxDimension()/Encoder::setMaxDimension() call this with the same
+   * width/height passed to Frame::setMaxDimension(), so both stay in
+   * sync. If storage is already allocated, releases it so the next
+   * reset() call reallocates at the new size.
+   */
+  void setMaxDimension(int maxWidth, int maxHeight) {
+    maxMbs_ = ((maxWidth + 15) / 16) * ((maxHeight + 15) / 16);
+    if (!sliceId_.empty()) {
+      sliceId_.clear();
+      sliceId_.shrink_to_fit();
+      mb_.clear();
+      mb_.shrink_to_fit();
+    }
+  }
+
+  /**
    * Clears all per-macroblock state and marks every macroblock as
    * "not yet decoded" (sliceId -1), ready to start a new picture of
    * `mbWidth` x `mbHeight` macroblocks. Allocates the backing storage
-   * (at H264_MAX_MBS capacity) on the first call; a no-op allocation-wise
-   * on subsequent calls, so this doesn't reintroduce per-picture heap
+   * (at maxMbs_ capacity) on the first call; a no-op allocation-wise on
+   * subsequent calls, so this doesn't reintroduce per-picture heap
    * allocation into the decode/encode hot path.
    */
   void reset(int mbWidth, int mbHeight) {
     mbWidth_ = mbWidth;
     mbHeight_ = mbHeight;
     if (sliceId_.empty()) {
-      sliceId_.resize(H264_MAX_MBS);
-      mb_.resize(H264_MAX_MBS);
+      sliceId_.resize(maxMbs_);
+      mb_.resize(maxMbs_);
     }
     int n = mbWidth * mbHeight;
     for (int i = 0; i < n; i++) {
@@ -209,6 +230,7 @@ class MbInfoTable {
 
  private:
   int mbWidth_ = 0, mbHeight_ = 0;
+  int maxMbs_ = H264_MAX_MBS;
   std::vector<int16_t> sliceId_;
   std::vector<MacroblockInfo> mb_;
 };

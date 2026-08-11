@@ -28,6 +28,7 @@ set(TINYH264_TESTS
     test_encode_ratecontrol
     test_encode_setters
     test_lifecycle
+    test_max_dimension
     test_nal
     test_public_api
     test_rgb565

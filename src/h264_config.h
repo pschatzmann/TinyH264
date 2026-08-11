@@ -35,6 +35,11 @@
 #define H264_MAX_HEIGHT 240
 #endif
 
+// Just the defaults - Decoder::setMaxDimension()/Encoder::setMaxDimension()
+// (or the TinyH264Decoder/TinyH264Encoder wrappers of the same name)
+// override these per instance at runtime instead, if you'd rather not use
+// a #define.
+
 /*
  * Compile-time *upper bound* on stored reference pictures - sizes a static
  * array of Frame<Allocator> (Decoder::refFrames_), so it must be fixed at
@@ -84,3 +89,8 @@
  */
 #define H264_MAX_SPS 4
 #define H264_MAX_PPS 4
+
+/*
+ * Activate optimizations
+ */
+//#pragma GCC optimize("O3")

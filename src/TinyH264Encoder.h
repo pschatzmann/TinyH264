@@ -225,6 +225,26 @@ class TinyH264Encoder {
   void setQp(int qp) { encoder_.setQp(qp); }
 
   /**
+   * Runtime alternative to `#define H264_MAX_WIDTH ...`/`#define
+   * H264_MAX_HEIGHT ...` before `#include`ing this header - overrides
+   * the picture-buffer/metadata-table/color-conversion-scratch
+   * allocation ceiling for this encoder instance (see
+   * Encoder::setMaxDimension(), encoder/h264_encoder.h, for the full
+   * explanation). A setSize()/encodeFrame() call for a picture bigger
+   * than this fails and returns 0. Call before the first encode to size
+   * buffers for your actual content up front instead of the compile-time
+   * H264_MAX_WIDTH/H264_MAX_HEIGHT default (h264_config.h) - e.g.
+   * `encoder.setMaxDimension(176, 144);` in setup().
+   */
+  void setMaxDimension(int maxWidth, int maxHeight) {
+    encoder_.setMaxDimension(maxWidth, maxHeight);
+  }
+  /// The current allocation-ceiling width - see setMaxDimension().
+  int maxWidth() const { return encoder_.maxWidth(); }
+  /// The current allocation-ceiling height - see setMaxDimension().
+  int maxHeight() const { return encoder_.maxHeight(); }
+
+  /**
    * Reserves this encoder's picture buffers up front instead of the
    * default allocate-on-first-encode behavior - see Encoder::begin()'s
    * own comment (encoder/h264_encoder.h) for exactly what this does, why
