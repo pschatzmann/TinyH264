@@ -82,7 +82,7 @@ inline int sad16x16At(const MbEncodeContext<Allocator>& ctx,
 }
 
 /**
- * Small integer-pel full search over +/-kRange pixels for the best
+ * Small integer-pel full search over +/-range pixels for the best
  * 16x16 motion vector, SAD-based with a light bias toward smaller
  * displacement (cheaper mvd_l0 to signal, and real motion in typical
  * content is usually small frame-to-frame) - not a rate-distortion-
@@ -92,15 +92,27 @@ inline int sad16x16At(const MbEncodeContext<Allocator>& ctx,
  * improvement, not implemented yet) into `outMv`; returns that MV's raw
  * SAD (not including the magnitude bias, which is a search-time-only
  * tiebreaker, not part of the reported cost).
+ *
+ * `range` defaults to 8 (this project's original, still-default search
+ * window) - see Encoder::setMotionSearchRange()/
+ * TinyH264Encoder::setMotionSearchRange() for the public, runtime-
+ * configurable entry point. Search cost is O(range^2) ((2*range+1)^2
+ * candidates, each a 256-pixel SAD - see docs/optimizations.md's
+ * "Encoding" chapter for measured numbers): halving `range` roughly
+ * quarters the candidate count, at the cost of not finding motion
+ * vectors larger than `range` pixels/frame - real motion beyond that
+ * still gets coded, just via a larger residual instead of a matching
+ * MV, so this trades encode speed for compression efficiency on
+ * fast-moving content, not correctness.
  */
 template <typename Allocator>
 inline int motionSearch16x16(const MbEncodeContext<Allocator>& ctx,
-                              const Frame<Allocator>& ref, int16_t* outMv) {
-  const int kRange = 8;
+                              const Frame<Allocator>& ref, int16_t* outMv,
+                              int range = 8) {
   int bestSad = sad16x16At(ctx, ref, 0, 0);
   int bestDx = 0, bestDy = 0;
-  for (int dy = -kRange; dy <= kRange; dy++) {
-    for (int dx = -kRange; dx <= kRange; dx++) {
+  for (int dy = -range; dy <= range; dy++) {
+    for (int dx = -range; dx <= range; dx++) {
       if (dx == 0 && dy == 0) continue;
       int sad = sad16x16At(ctx, ref, dx, dy);
       int cost = sad + (abs(dx) + abs(dy));
@@ -112,6 +124,105 @@ inline int motionSearch16x16(const MbEncodeContext<Allocator>& ctx,
       }
     }
   }
+  outMv[0] = (int16_t)(bestDx * 4);
+  outMv[1] = (int16_t)(bestDy * 4);
+  return bestSad;
+}
+
+/**
+ * Which search motionSearch16x16Dispatch() (h264_encoder.h) uses -
+ * `Exhaustive` (the default, unchanged since this project's first P-frame
+ * milestone) is motionSearch16x16() above; `Fast` is
+ * motionSearch16x16Fast() below. See Encoder::setMotionSearchAlgorithm()/
+ * TinyH264Encoder::setMotionSearchAlgorithm() for the public entry point.
+ */
+enum class MotionSearchAlgorithm { Exhaustive, Fast };
+
+/**
+ * Classic Diamond Search (Zhu & Ma, 2000) - checks ~15-30 candidates on
+ * typical content instead of exhaustive search's `(2*range+1)^2` (289 at
+ * the default range=8), at the cost of being a *local* search: it can
+ * settle on a locally-good match that isn't the true global-best SAD
+ * (data-dependent - see docs/optimizations.md's "Encoding" chapter,
+ * "Fast search algorithm" for the original motivation and why this is
+ * opt-in, not the default). Same cost function and MV-encoding convention
+ * as motionSearch16x16() (a light magnitude bias, quarter-pel output units,
+ * bounded to +/-range) so the two are drop-in alternatives for the same
+ * call site.
+ *
+ * Starts at (0,0) (this project's zero-motion prior - real content
+ * usually has small frame-to-frame motion, so this is normally already
+ * close to the true best match) and alternates two diamond-shaped probe
+ * patterns around a moving search center:
+ *  - LDSP (Large Diamond Search Pattern, radius 2, 8 points): evaluated
+ *    around the current center; if any point beats the center, the center
+ *    moves there and LDSP repeats around the new center; if none does,
+ *    the search has converged and moves on to SDSP.
+ *  - SDSP (Small Diamond Search Pattern, radius 1, 4 points): one final
+ *    refinement pass once LDSP converges - this is what lets the result
+ *    land on a match LDSP's radius-2 steps would otherwise step over.
+ *
+ * LDSP is capped at `2*range+1` iterations (each iteration can only move
+ * the center by up to 2 pixels toward the range boundary, so this is
+ * already more than enough to reach it from (0,0) - a real hard bound,
+ * not just a typical-case expectation) so pathological content can't turn
+ * this into an unbounded loop; real content converges in a handful of
+ * iterations, well under that cap.
+ */
+template <typename Allocator>
+inline int motionSearch16x16Fast(const MbEncodeContext<Allocator>& ctx,
+                                  const Frame<Allocator>& ref, int16_t* outMv,
+                                  int range = 8) {
+  static const int kLdspDx[8] = {0, 0, -1, 1, -1, 1, -2, 2};
+  static const int kLdspDy[8] = {-2, 2, -1, -1, 1, 1, 0, 0};
+  static const int kSdspDx[4] = {0, 0, -1, 1};
+  static const int kSdspDy[4] = {-1, 1, 0, 0};
+
+  int bestDx = 0, bestDy = 0;
+  int bestSad = sad16x16At(ctx, ref, 0, 0);
+  int bestCost = bestSad;  // + abs(0) + abs(0)
+
+  int cx = 0, cy = 0;
+  int maxIterations = 2 * range + 1;
+  for (int iter = 0; iter < maxIterations; iter++) {
+    int roundBestDx = cx, roundBestDy = cy;
+    int roundBestSad = bestSad, roundBestCost = bestCost;
+    bool improved = false;
+    for (int i = 0; i < 8; i++) {
+      int dx = cx + kLdspDx[i], dy = cy + kLdspDy[i];
+      if (dx < -range || dx > range || dy < -range || dy > range) continue;
+      int sad = sad16x16At(ctx, ref, dx, dy);
+      int cost = sad + (abs(dx) + abs(dy));
+      if (cost < roundBestCost) {
+        roundBestCost = cost;
+        roundBestSad = sad;
+        roundBestDx = dx;
+        roundBestDy = dy;
+        improved = true;
+      }
+    }
+    if (!improved) break;
+    bestCost = roundBestCost;
+    bestSad = roundBestSad;
+    bestDx = roundBestDx;
+    bestDy = roundBestDy;
+    cx = bestDx;
+    cy = bestDy;
+  }
+
+  for (int i = 0; i < 4; i++) {
+    int dx = cx + kSdspDx[i], dy = cy + kSdspDy[i];
+    if (dx < -range || dx > range || dy < -range || dy > range) continue;
+    int sad = sad16x16At(ctx, ref, dx, dy);
+    int cost = sad + (abs(dx) + abs(dy));
+    if (cost < bestCost) {
+      bestCost = cost;
+      bestSad = sad;
+      bestDx = dx;
+      bestDy = dy;
+    }
+  }
+
   outMv[0] = (int16_t)(bestDx * 4);
   outMv[1] = (int16_t)(bestDy * 4);
   return bestSad;
@@ -229,64 +340,31 @@ inline void quantizeChromaInter(MbEncodeContext<Allocator>& ctx,
 }
 
 /**
- * Checks whether motion-compensating the current macroblock with
- * (mvX,mvY) and quantizing the resulting residual at `qp` would produce
- * an all-zero residual (both luma and chroma, chroma via the real
- * quantizeChromaInter() - not a per-block-in-isolation check, since
- * hadamard2x2() mixes the 4 chroma blocks' DC values together, so a
- * single block's own raw DC being nonzero doesn't determine whether the
- * *transformed* chroma DC block quantizes to zero) - used by the
- * encoder's P-slice loop to decide whether a macroblock whose motion-
- * estimated best MV happens to equal the *inferred* P_Skip MV (see
- * skipMv() above) can actually be skipped (skip always means "zero
- * residual", so this check is what makes that valid rather than just
- * plausible). Leaves the motion-compensated prediction sitting in
- * ctx.frame as a side effect either way (needed next regardless of the
- * outcome - real residual encoding if not all-zero, or the skip's own
- * final state if it is) - the same "no separate scratch buffer, let the
- * real work double as the trial" pattern as chooseIntra16x16Mode()
- * (h264_macroblock_encode.h).
+ * Motion-compensates the current macroblock at (mvX,mvY) and computes its
+ * full P_L0_16x16 residual (luma 4x4 transform/quantize for all 16
+ * blocks, chroma via quantizeChromaInter()) into caller-provided storage,
+ * without writing any bitstream - the "residual computation" half of what
+ * used to be one monolithic encodeMacroblockInter16x16(). Fills `mb`
+ * (type=kMbInter, mv/refIdx via fillPartitionMv(), cbpLuma/cbpChroma) and
+ * `lumaBlocks`/`chromaBlocks`/`chromaDcGrid` with the real quantized
+ * coefficients - not a throwaway trial - so a caller that already needs
+ * this MV's residual for a skip check (see wouldHaveZeroResidual() below)
+ * can hand the *same* computed result straight to finishInterMacroblock()
+ * instead of paying for motion compensation and the full transform/
+ * quantize pass a second time. Returns whether the residual is entirely
+ * zero (both luma and chroma - the hadamard2x2()-mixed chroma DC block
+ * means this can't be determined from any single 4x4 block in isolation).
+ * Leaves the motion-compensated prediction sitting in ctx.frame as a side
+ * effect (needed by whichever caller runs next either way: real residual
+ * reconstruction if non-zero, or the skip's own final state if zero).
  */
 template <typename Allocator>
-inline bool wouldHaveZeroResidual(MbEncodeContext<Allocator>& ctx,
-                                   const Frame<Allocator>& ref, int16_t mvX,
-                                   int16_t mvY, int qp) {
-  motionCompensate16x16(ctx, ref, mvX, mvY);
-  int px0 = ctx.mbX * 16, py0 = ctx.mbY * 16;
-  for (int blk = 0; blk < 16; blk++) {
-    int bx = kBlk4x4X[blk], by = kBlk4x4Y[blk];
-    int px = px0 + bx * 4, py = py0 + by * 4;
-    int32_t block[16];
-    subtractBlock4x4(ctx.srcY + (size_t)py * ctx.srcStrideY + px,
-                      ctx.srcStrideY, ctx.frame->yRow(py) + px,
-                      ctx.frame->strideY, block);
-    forwardDct4x4(block);
-    if (quantizeBlock4x4(block, qp, false)) return false;
-  }
-  MacroblockInfo throwaway;
-  int32_t chromaBlocks[2][4][16];
-  int32_t chromaDcGrid[2][4];
-  quantizeChromaInter(ctx, throwaway, qp, chromaBlocks, chromaDcGrid);
-  return throwaway.cbpChroma == 0;
-}
-
-/**
- * Encodes one P_L0_16x16 macroblock: motion search, MV prediction/mvd
- * encoding, motion compensation, residual transform/quantize/CAVLC (the
- * residual side mirrors encodeMacroblockIntra4x4()'s luma loop closely -
- * full per-4x4-block transform, no Hadamard DC special-case, since that
- * only applies to Intra16x16 - and reuses quantizeChromaInter()/
- * writeChromaResidual() for chroma). Returns the running QP after this
- * macroblock (see the mb_qp_delta gating note below - same "only coded
- * if there's residual" rule as I_4x4, not I_16x16's unconditional one).
- */
-template <typename Allocator>
-inline int encodeMacroblockInter16x16(BitWriter& bw,
-                                       MbEncodeContext<Allocator>& ctx,
-                                       const Frame<Allocator>& ref,
-                                       int16_t mvX, int16_t mvY, int qpPrev,
-                                       int targetQp) {
-  MacroblockInfo& mb = ctx.mbInfo->at(ctx.mbX, ctx.mbY);
+inline bool computeInterResidual(MbEncodeContext<Allocator>& ctx,
+                                  const Frame<Allocator>& ref, int16_t mvX,
+                                  int16_t mvY, int targetQp, MacroblockInfo& mb,
+                                  int32_t lumaBlocks[16][16],
+                                  int32_t chromaBlocks[2][4][16],
+                                  int32_t chromaDcGrid[2][4]) {
   mb = MacroblockInfo();
   mb.type = kMbInter;
   fillPartitionMv(mb, 0, 0, 4, 4, mvX, mvY, 0);
@@ -294,8 +372,7 @@ inline int encodeMacroblockInter16x16(BitWriter& bw,
   motionCompensate16x16(ctx, ref, mvX, mvY);
 
   int px0 = ctx.mbX * 16, py0 = ctx.mbY * 16;
-  int32_t lumaBlocks[16][16];
-  bool blockNonzero[16];
+  int cbpLuma = 0;
   for (int blk = 0; blk < 16; blk++) {
     int bx = kBlk4x4X[blk], by = kBlk4x4Y[blk];
     int px = px0 + bx * 4, py = py0 + by * 4;
@@ -303,17 +380,69 @@ inline int encodeMacroblockInter16x16(BitWriter& bw,
                       ctx.srcStrideY, ctx.frame->yRow(py) + px,
                       ctx.frame->strideY, lumaBlocks[blk]);
     forwardDct4x4(lumaBlocks[blk]);
-    blockNonzero[blk] = quantizeBlock4x4(lumaBlocks[blk], targetQp, false);
-  }
-  int cbpLuma = 0;
-  for (int blk = 0; blk < 16; blk++) {
-    if (blockNonzero[blk]) cbpLuma |= (1 << (blk / 4));
+    if (quantizeBlock4x4(lumaBlocks[blk], targetQp, false))
+      cbpLuma |= (1 << (blk / 4));
   }
   mb.cbpLuma = (uint8_t)cbpLuma;
 
-  int32_t chromaBlocks[2][4][16];
-  int32_t chromaDcGrid[2][4];
   quantizeChromaInter(ctx, mb, targetQp, chromaBlocks, chromaDcGrid);
+
+  return mb.cbpLuma == 0 && mb.cbpChroma == 0;
+}
+
+/**
+ * Checks whether motion-compensating the current macroblock with
+ * (mvX,mvY) and quantizing the resulting residual at `qp` would produce
+ * an all-zero residual - used by the encoder's P-slice loop to decide
+ * whether a macroblock whose motion-estimated best MV happens to equal
+ * the *inferred* P_Skip MV (see skipMv() above) can actually be skipped
+ * (skip always means "zero residual", so this check is what makes that
+ * valid rather than just plausible). A thin wrapper around
+ * computeInterResidual() that discards the computed mb/blocks - kept for
+ * callers that only need the yes/no answer (see
+ * test/native/test_encode_pslice_intra_fallback.cpp); Encoder::
+ * encodePFrame() itself calls computeInterResidual() directly instead, so
+ * it can reuse the computed residual via finishInterMacroblock() rather
+ * than recomputing it from scratch when the answer turns out to be "no".
+ */
+template <typename Allocator>
+inline bool wouldHaveZeroResidual(MbEncodeContext<Allocator>& ctx,
+                                   const Frame<Allocator>& ref, int16_t mvX,
+                                   int16_t mvY, int qp) {
+  MacroblockInfo throwawayMb;
+  int32_t throwawayLuma[16][16];
+  int32_t throwawayChroma[2][4][16];
+  int32_t throwawayChromaDc[2][4];
+  return computeInterResidual(ctx, ref, mvX, mvY, qp, throwawayMb,
+                               throwawayLuma, throwawayChroma,
+                               throwawayChromaDc);
+}
+
+/**
+ * Writes one P_L0_16x16 macroblock's bitstream (mb_type, mvd_l0, cbp,
+ * mb_qp_delta, luma/chroma residual) and reconstructs it into ctx.frame,
+ * from a residual already computed by computeInterResidual() for the same
+ * (mvX,mvY) - the "bitstream writing" half of what used to be one
+ * monolithic encodeMacroblockInter16x16() (see that function, now just a
+ * thin compute-then-finish wrapper, and computeInterResidual()'s own
+ * comment for why this split exists). `mb` is copied into
+ * ctx.mbInfo->at(ctx.mbX, ctx.mbY) as-is (its cbpLuma/cbpChroma/mv/refIdx
+ * were already set by computeInterResidual()); only qpY/nnz are filled in
+ * here, since those depend on whether this macroblock actually has
+ * residual to code. Returns the running QP after this macroblock (see the
+ * mb_qp_delta gating note below - same "only coded if there's residual"
+ * rule as I_4x4, not I_16x16's unconditional one).
+ */
+template <typename Allocator>
+inline int finishInterMacroblock(BitWriter& bw, MbEncodeContext<Allocator>& ctx,
+                                  const MacroblockInfo& computedMb,
+                                  int32_t lumaBlocks[16][16],
+                                  int32_t chromaBlocks[2][4][16],
+                                  int32_t chromaDcGrid[2][4], int16_t mvX,
+                                  int16_t mvY, int qpPrev, int targetQp) {
+  MacroblockInfo& mb = ctx.mbInfo->at(ctx.mbX, ctx.mbY);
+  mb = computedMb;
+  int px0 = ctx.mbX * 16, py0 = ctx.mbY * 16;
 
   // --- mb_type, ref_idx_l0, mvd_l0 ---------------------------------------
   bw.ue(kPL0_16x16);
@@ -377,6 +506,36 @@ inline int encodeMacroblockInter16x16(BitWriter& bw,
   writeChromaResidual(bw, ctx, mb, targetQp, chromaBlocks, chromaDcGrid);
 
   return qpUsed;
+}
+
+/**
+ * Encodes one P_L0_16x16 macroblock: motion compensation, residual
+ * transform/quantize/CAVLC (the residual side mirrors
+ * encodeMacroblockIntra4x4()'s luma loop closely - full per-4x4-block
+ * transform, no Hadamard DC special-case, since that only applies to
+ * Intra16x16 - and reuses quantizeChromaInter()/writeChromaResidual() for
+ * chroma). A thin wrapper around computeInterResidual() +
+ * finishInterMacroblock() (see each one's own comment) for callers that
+ * don't already have a computed residual to reuse - Encoder::
+ * encodePFrame() calls the two split halves directly instead, to avoid
+ * recomputing a residual it may have already computed via
+ * wouldHaveZeroResidual()'s skip check. Returns the running QP after this
+ * macroblock.
+ */
+template <typename Allocator>
+inline int encodeMacroblockInter16x16(BitWriter& bw,
+                                       MbEncodeContext<Allocator>& ctx,
+                                       const Frame<Allocator>& ref,
+                                       int16_t mvX, int16_t mvY, int qpPrev,
+                                       int targetQp) {
+  MacroblockInfo mb;
+  int32_t lumaBlocks[16][16];
+  int32_t chromaBlocks[2][4][16];
+  int32_t chromaDcGrid[2][4];
+  computeInterResidual(ctx, ref, mvX, mvY, targetQp, mb, lumaBlocks,
+                        chromaBlocks, chromaDcGrid);
+  return finishInterMacroblock(bw, ctx, mb, lumaBlocks, chromaBlocks,
+                                chromaDcGrid, mvX, mvY, qpPrev, targetQp);
 }
 
 /**

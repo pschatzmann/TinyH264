@@ -123,6 +123,63 @@ converged after only 10 frames, range of the target
 converges more precisely than this project's own short test streams can
 demonstrate.
 
+**Motion search range**: `setMotionSearchRange(range)` overrides the
++/-`range`-pixel window each P-macroblock's motion search checks
+(default 8). Search cost is roughly `O(range^2)`, so this is a real
+speed/compression tradeoff, not a quality-only setting - a smaller range
+encodes faster but can't represent motion larger than `range`
+pixels/frame (the encoder still produces a correct bitstream regardless,
+just with a bigger residual instead of a matching motion vector for
+motion beyond the window):
+
+```cpp
+encoder.setMotionSearchRange(4);  // faster, worse compression on fast motion
+```
+
+See [Optimizations](optimizations.md#encoding) for
+the measured numbers this default (8) costs on real hardware, and why a
+smaller range is the safest lever to pull first if you need more
+headroom than the applied SAD fast-path already gives you.
+
+**Motion search algorithm**: `setMotionSearchAlgorithm(MotionSearchAlgorithm::Fast)`
+switches from the default exhaustive full search (`Exhaustive`, guaranteed
+to find the true best-SAD match within `range`) to a Diamond Search
+(`Fast`) that checks far fewer candidates - roughly 15-30 on typical
+content instead of `(2*range+1)^2` (289 at the default range=8):
+
+```cpp
+encoder.setMotionSearchAlgorithm(MotionSearchAlgorithm::Fast);  // opt-in
+```
+
+Unlike `setMotionSearchRange()`, this is not a pure speed/compression
+dial: Diamond Search is a *local* search (it follows whichever neighbor
+looks best from wherever it currently is), so on content whose SAD
+surface has more than one local minimum it can converge on a match that
+isn't the true global best - a real, data-dependent quality/compression
+tradeoff, not just slower-but-equivalent. The bitstream is still always
+valid and self-decodable regardless (a suboptimal MV just costs a bigger
+residual, never correctness - `test/native/test_motion_search_fast.cpp`).
+Defaults to `Exhaustive` so existing behavior/bit-exactness is unchanged
+for anyone not opting in. See
+[Optimizations](optimizations.md#encoding) for the
+measured candidate-count/speed tradeoff.
+
+`setAllOptimizationsActive(true)` is a shorthand for "turn on every
+optional, opt-in performance optimization this encoder has" - currently
+just `setMotionSearchAlgorithm(MotionSearchAlgorithm::Fast)`, since that's
+the only one with a real behavior tradeoff to opt into (permanently-applied
+fixes with no tradeoff, like the SAD branch-elimination and duplicate
+motion-compensation/transform eliminations documented in
+[Optimizations](optimizations.md#encoding), are always on - nothing to
+switch). Doesn't touch `setMotionSearchRange()`, a continuous dial rather
+than an on/off optimization. `setAllOptimizationsActive(false)` reverts to
+`Exhaustive`. A convenience for not having to track each optional
+optimization's own setter individually as more get added over time:
+
+```cpp
+encoder.setAllOptimizationsActive(true);  // == setMotionSearchAlgorithm(Fast) today
+```
+
 For source data that isn't already three separate Y/U/V planes,
 `encodeFrameRgb888()`/`encodeFrameRgb666()`/`encodeFrameRgb565()`/
 `encodeFrameYuv422()` take a single packed-pixel source buffer instead

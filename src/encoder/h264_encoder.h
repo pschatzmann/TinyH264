@@ -279,6 +279,81 @@ class Encoder {
   void setQp(int qp) { defaultQp_ = qp; }
 
   /**
+   * Overrides the +/-pixel window motionSearch16x16() (see
+   * h264_macroblock_encode_inter.h) searches for each P-macroblock's
+   * motion vector - defaults to 8 (this project's original, still-
+   * default search window). Search cost is O(range^2)
+   * ((2*range+1)^2 candidate positions, each a 256-pixel SAD - see
+   * docs/optimizations.md's "Encoding" chapter for measured
+   * numbers, e.g. ~730ms/P-frame at the default range=8 on real ESP32/
+   * RP2040 hardware at QCIF): a smaller range trades this away
+   * proportionally faster, at the cost of not finding motion vectors
+   * larger than `range` pixels/frame - real motion beyond that still
+   * gets encoded correctly, just via a larger residual instead of a
+   * matching MV (worse compression on fast-moving content, not a
+   * correctness issue). Clamped to >= 1; values are otherwise
+   * unconstrained (a larger-than-8 range is legal too, just slower and
+   * rarely useful since real content-to-content motion beyond 8 pixels/
+   * frame at typical frame rates is uncommon).
+   */
+  void setMotionSearchRange(int range) {
+    if (range < 1) range = 1;
+    motionSearchRange_ = range;
+  }
+  /// The current motion search range - see setMotionSearchRange().
+  int motionSearchRange() const { return motionSearchRange_; }
+
+  /**
+   * Selects which algorithm motion-estimates each P-macroblock's motion
+   * vector - `MotionSearchAlgorithm::Exhaustive` (the default, unchanged
+   * since this project's first P-frame milestone) is motionSearch16x16()
+   * (h264_macroblock_encode_inter.h): a full `(2*range+1)^2`-candidate
+   * search, guaranteed to find the true best-SAD match within the window.
+   * `MotionSearchAlgorithm::Fast` is motionSearch16x16Fast(): a classic
+   * Diamond Search that checks far fewer candidates (~15-30 on typical
+   * content vs. 289 at the default range=8) but is a *local* search - it
+   * can settle on a locally-good match that isn't the true global-best
+   * SAD (a real, data-dependent quality/compression tradeoff, not just a
+   * speed dial - see docs/optimizations.md's "Encoding" chapter,
+   * "Fast search algorithm"). Defaults to Exhaustive so existing
+   * behavior/bit-exactness is unchanged unless a caller opts in.
+   */
+  void setMotionSearchAlgorithm(MotionSearchAlgorithm algorithm) {
+    motionSearchAlgorithm_ = algorithm;
+  }
+  /// The current motion search algorithm - see setMotionSearchAlgorithm().
+  MotionSearchAlgorithm motionSearchAlgorithm() const {
+    return motionSearchAlgorithm_;
+  }
+
+  /**
+   * Single switch for every *optional, opt-in* performance optimization
+   * this encoder exposes - currently just setMotionSearchAlgorithm()
+   * (`true` selects `MotionSearchAlgorithm::Fast`, `false` selects
+   * `MotionSearchAlgorithm::Exhaustive`, the default). Does *not* touch
+   * setMotionSearchRange(): that's a continuous speed/compression dial,
+   * not an on/off optimization, and combining it with `Fast` measured
+   * almost no additional benefit over `Fast` alone anyway (see
+   * docs/optimizations.md's "Encoding" chapter) - so this
+   * intentionally leaves it at whatever the caller already configured.
+   * Also does not touch anything permanently applied with no tradeoff
+   * (the SAD branch-elimination fix, the duplicate motion-compensation/
+   * transform elimination) - those aren't optional, so there's nothing
+   * to switch. A convenience for callers who just want "make this faster"
+   * without tracking each optional optimization's own setter individually
+   * as more are added over time - equivalent to calling
+   * setMotionSearchAlgorithm(MotionSearchAlgorithm::Fast) directly today,
+   * but insulates a caller from needing to know that's currently the only
+   * one. See docs/encoding.md and docs/optimizations.md for the
+   * real compression/quality tradeoff `Fast` carries - this is not a free
+   * win, so it stays opt-in either way it's reached.
+   */
+  void setAllOptimizationsActive(bool active) {
+    setMotionSearchAlgorithm(active ? MotionSearchAlgorithm::Fast
+                                     : MotionSearchAlgorithm::Exhaustive);
+  }
+
+  /**
    * Overrides the H264_MAX_WIDTH/H264_MAX_HEIGHT compile-time defaults
    * (h264_config.h) for this Encoder instance's own picture-buffer,
    * per-macroblock-metadata, and color-conversion-scratch allocation
@@ -592,7 +667,11 @@ class Encoder {
       ctx.mbY = mbY;
 
       int16_t bestMv[2];
-      int interSad = motionSearch16x16(ctx, refFrame_, bestMv);
+      int interSad = motionSearchAlgorithm_ == MotionSearchAlgorithm::Fast
+                          ? motionSearch16x16Fast(ctx, refFrame_, bestMv,
+                                                   motionSearchRange_)
+                          : motionSearch16x16(ctx, refFrame_, bestMv,
+                                               motionSearchRange_);
       int16_t skipMvVal[2];
       skipMv(ctx, skipMvVal);
 
@@ -600,19 +679,45 @@ class Encoder {
        * P_Skip is only valid (per clause 8.4.1.1's implicit "zero
        * residual" meaning) when the motion-estimated best match *is*
        * the inferred skip MV *and* that MV's residual actually quantizes
-       * to zero - see wouldHaveZeroResidual()'s own comment. Either way
-       * this call leaves ctx.frame holding the correct motion-compensated
-       * prediction for skipMvVal, reused directly by encodeMacroblockPSkip()
-       * below without redoing the motion compensation. Checked first and
-       * short-circuits the Intra-vs-Inter decision below entirely - a
+       * to zero. Only worth computing that residual at all when the MVs
+       * already match (mvEqSkip) - see computeInterResidual()'s own
+       * comment for why this is the *same* computation
+       * wouldHaveZeroResidual() used to redo a second time whenever the
+       * answer was "no": that residual is exactly what finishInterMacroblock()
+       * below needs if this macroblock turns out to be a real P_L0_16x16
+       * (not skip, not Intra) instead, so it's kept rather than discarded.
+       * Checked first and short-circuits the Intra-vs-Inter decision below
+       * entirely (same as before this trial was made reusable) - a
        * genuine zero-bit skip is never worse than either alternative, so
-       * there's nothing to compare it against.
+       * there's nothing to compare it against, and skip macroblocks never
+       * pay for the intra trial below either.
        */
-      bool isSkip = bestMv[0] == skipMvVal[0] && bestMv[1] == skipMvVal[1] &&
-                    wouldHaveZeroResidual(ctx, refFrame_, skipMvVal[0],
-                                          skipMvVal[1], qpRunning);
+      bool mvEqSkip = bestMv[0] == skipMvVal[0] && bestMv[1] == skipMvVal[1];
+      MacroblockInfo trialMb;
+      int32_t trialLumaBlocks[16][16];
+      int32_t trialChromaBlocks[2][4][16];
+      int32_t trialChromaDcGrid[2][4];
+      bool isSkip = false;
+      if (mvEqSkip) {
+        isSkip = computeInterResidual(ctx, refFrame_, skipMvVal[0],
+                                       skipMvVal[1], qpRunning, trialMb,
+                                       trialLumaBlocks, trialChromaBlocks,
+                                       trialChromaDcGrid);
+      }
       if (isSkip) {
-        encodeMacroblockPSkip(ctx, refFrame_, qpRunning);
+        /*
+         * Zero residual: ctx.frame already holds the correct final
+         * reconstruction (computeInterResidual()'s motion compensation,
+         * unmodified since adding an all-zero residual is a no-op) and
+         * trialMb already has the right mv/refIdx (fillPartitionMv() for
+         * skipMvVal) and cbpLuma==cbpChroma==0 - just relabel it P_Skip
+         * instead of redoing skipMv()+motionCompensate16x16() a second
+         * time via encodeMacroblockPSkip().
+         */
+        MacroblockInfo& mb = mbInfo_.at(mbX, mbY);
+        mb = trialMb;
+        mb.type = kMbPSkip;
+        mb.qpY = (int8_t)qpRunning;
         pendingSkipRun++;
         continue;
       }
@@ -623,8 +728,10 @@ class Encoder {
        * shouldUseIntraInPSlice()'s own comment (h264_macroblock_encode_inter.h)
        * for the heuristic. chooseIntra16x16Mode() is a real trial (same
        * "harmless either way" reasoning as encodeIFrame()'s own I_16x16-
-       * vs-I_4x4 decision above: its prediction write into ctx.frame gets
-       * naturally overwritten by whichever real path runs next).
+       * vs-I_4x4 decision above) - but note it only overwrites ctx.frame's
+       * *luma* plane (see its own comment), which matters below: if this
+       * macroblock reuses the computeInterResidual() trial above, only
+       * luma (not chroma) needs restoring afterward.
        */
       bool leftAvail = mbInfo_.leftAvailable(mbX, mbY, ctx.sliceId);
       bool topAvail = mbInfo_.topAvailable(mbX, mbY, ctx.sliceId);
@@ -643,6 +750,23 @@ class Encoder {
           qpRunning = encodeMacroblockIntra16x16(sliceW, ctx, qpRunning, qp,
                                                   /*mbTypeOffset=*/5);
         }
+      } else if (mvEqSkip) {
+        /*
+         * computeInterResidual() above already computed bestMv's (==
+         * skipMvVal's) residual and found it non-zero - reuse it instead
+         * of paying for the full transform/quantize pass a second time
+         * (see finishInterMacroblock()'s own comment). chooseIntra16x16Mode()
+         * just clobbered ctx.frame's luma plane with its own trial
+         * prediction though (chroma untouched - see the comment above),
+         * so luma needs re-establishing before finishInterMacroblock()'s
+         * reconstruction step runs against it.
+         */
+        int px = ctx.mbX * 16, py = ctx.mbY * 16;
+        motionCompLuma(ctx.frame->yRow(py) + px, ctx.frame->strideY,
+                        refFrame_, px, py, 16, 16, bestMv[0], bestMv[1]);
+        qpRunning = finishInterMacroblock(
+            sliceW, ctx, trialMb, trialLumaBlocks, trialChromaBlocks,
+            trialChromaDcGrid, bestMv[0], bestMv[1], qpRunning, qp);
       } else {
         qpRunning = encodeMacroblockInter16x16(sliceW, ctx, refFrame_,
                                                 bestMv[0], bestMv[1],
@@ -1039,6 +1163,9 @@ class Encoder {
 
   int maxWidth_ = H264_MAX_WIDTH;    ///< allocation-ceiling width, see setMaxDimension()
   int maxHeight_ = H264_MAX_HEIGHT;  ///< allocation-ceiling height, see setMaxDimension()
+  int motionSearchRange_ = 8;  ///< +/-pixel search window, see setMotionSearchRange()
+  MotionSearchAlgorithm motionSearchAlgorithm_ =
+      MotionSearchAlgorithm::Exhaustive;  ///< see setMotionSearchAlgorithm()
 };
 
 }  // namespace tinyh264

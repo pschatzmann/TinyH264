@@ -28,6 +28,23 @@ static const int kKeyframeInterval = 4; // 1 I-frame every 4 pictures
 static const int kTargetBps = 300000;  // rate control target
 static const double kFps = 25.0;
 
+// +/-pixel motion search window (default 8, same as never calling
+// setMotionSearchRange() at all) - lower this to trade encode speed for
+// worse compression on fast motion (search cost is roughly O(range^2) -
+// see docs/optimizations.md's "Encoding" chapter for measured
+// numbers at the default).
+static const int kMotionSearchRange = 8;
+
+// Exhaustive (default) checks every candidate in the +/-kMotionSearchRange
+// window and always finds the true best-SAD match; Fast (Diamond Search)
+// checks far fewer candidates and is faster, but can settle for a locally-
+// rather than globally-best match on some content (see docs/encoding.md's
+// "Motion search algorithm" section and docs/optimizations.md's
+// "Encoding" chapter for the measured tradeoff) - flip this to
+// MotionSearchAlgorithm::Fast to try it.
+static const MotionSearchAlgorithm kMotionSearchAlgorithm =
+    MotionSearchAlgorithm::Exhaustive;
+
 /*
  * Encode the kNumFrames-picture sequence this many times back to back to
  * get a stable timing average instead of judging performance off 8
@@ -97,6 +114,8 @@ void setup() {
   // See the file header comment: sizes buffers for this sketch's actual
   // QCIF content instead of the project-wide compile-time default.
   encoder.setMaxDimension(kWidth, kHeight);
+  encoder.setMotionSearchRange(kMotionSearchRange);
+  encoder.setMotionSearchAlgorithm(kMotionSearchAlgorithm);
 
   /*
    * Width/height/keyframe interval were already configured by the

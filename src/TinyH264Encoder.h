@@ -225,6 +225,53 @@ class TinyH264Encoder {
   void setQp(int qp) { encoder_.setQp(qp); }
 
   /**
+   * Overrides the +/-pixel window the motion search checks per
+   * P-macroblock - see Encoder::setMotionSearchRange()'s own comment
+   * (default 8) for the speed/compression tradeoff. Search cost is
+   * O(range^2); a smaller range encodes faster but can't represent
+   * motion larger than `range` pixels/frame (encoded via a bigger
+   * residual instead, not a correctness issue).
+   */
+  void setMotionSearchRange(int range) { encoder_.setMotionSearchRange(range); }
+  /// The current motion search range - see setMotionSearchRange().
+  int motionSearchRange() const { return encoder_.motionSearchRange(); }
+
+  /**
+   * Selects the motion search algorithm - see
+   * Encoder::setMotionSearchAlgorithm()'s own comment (encoder/
+   * h264_encoder.h) for the full tradeoff. Defaults to
+   * `MotionSearchAlgorithm::Exhaustive` (a full, guaranteed-best-match
+   * search within the window - this project's original, still-default
+   * behavior); `MotionSearchAlgorithm::Fast` (a Diamond Search) checks far
+   * fewer candidates but can settle on a locally-good, not globally-best,
+   * match on some content - a real compression/speed tradeoff, not a
+   * free win, so it's opt-in:
+   *
+   *   encoder.setMotionSearchAlgorithm(MotionSearchAlgorithm::Fast);
+   */
+  void setMotionSearchAlgorithm(MotionSearchAlgorithm algorithm) {
+    encoder_.setMotionSearchAlgorithm(algorithm);
+  }
+  /// The current motion search algorithm - see setMotionSearchAlgorithm().
+  MotionSearchAlgorithm motionSearchAlgorithm() const {
+    return encoder_.motionSearchAlgorithm();
+  }
+
+  /**
+   * Single switch for every optional, opt-in performance optimization -
+   * see Encoder::setAllOptimizationsActive()'s own comment (encoder/
+   * h264_encoder.h) for exactly what it does and doesn't touch (currently
+   * just setMotionSearchAlgorithm(); not setMotionSearchRange(), and not
+   * the always-on fixes that have no tradeoff to opt into):
+   *
+   *   encoder.setAllOptimizationsActive(true);  // faster, real compression
+   *                                              // tradeoff on some content
+   */
+  void setAllOptimizationsActive(bool active) {
+    encoder_.setAllOptimizationsActive(active);
+  }
+
+  /**
    * Runtime alternative to `#define H264_MAX_WIDTH ...`/`#define
    * H264_MAX_HEIGHT ...` before `#include`ing this header - overrides
    * the picture-buffer/metadata-table/color-conversion-scratch

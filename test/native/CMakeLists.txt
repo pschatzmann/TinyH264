@@ -29,6 +29,8 @@ set(TINYH264_TESTS
     test_encode_setters
     test_lifecycle
     test_max_dimension
+    test_motion_search_fast
+    test_motion_search_range
     test_nal
     test_public_api
     test_rgb565
