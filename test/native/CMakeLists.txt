@@ -33,6 +33,7 @@ set(TINYH264_TESTS
     test_rgb565
     test_rgb666
     test_rgb888
+    test_scale
     test_slice_header
     test_sps_pps
     test_yuv420

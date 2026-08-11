@@ -37,11 +37,17 @@
  *
  * If the screen stays blank: check the backlight pin and SPI pins
  * first. If it lights up but the image is rotated, mirrored, or has
- * swapped colors: adjust kMadctlLandscape below - exact MADCTL bit
- * meaning varies by panel vendor even for the same controller IC.
+ * swapped colors: try a different kRotationLandscape value below (0-3,
+ * see ILI9341Driver's constructor in TinyGPU) - exact MADCTL bit meaning
+ * varies by panel vendor even for the same controller IC.
  *
  * ESP32-only: uses ESP32-Arduino's 4-argument SPI.begin() pin-remap
  * overload, which RP2040-Arduino's SPI class doesn't have.
+ *
+ * Measures decode time and convert+SPI-push time separately with
+ * micros() (excluding the deliberate pacing delay() below), printing a
+ * per-frame line plus a rolling avg/min/max summary once per clip loop -
+ * same on-device-measurement approach as DecodeFromProgmem's benchmark.
  */
 
 #if !defined(ARDUINO_ARCH_ESP32)
@@ -79,8 +85,11 @@ constexpr int kOffsetY = (kPanelHeight - kDisplayHeight) / 2;
 constexpr int kBandHeight = 16;
 constexpr int kBandCount = kDisplayHeight / kBandHeight;
 
-// The embedded clip was encoded at 10 fps - paces playback to match.
+// The embedded clip was encoded at 10 fps, 10 frames total (see
+// h264_display_test_clip.h) - paces playback to match and marks where
+// one full loop of the clip ends, for the periodic timing summary below.
 constexpr int kClipFps = 10;
+constexpr int kClipFrameCount = 10;
 
 // --- SPI / display pins -----------------------------------------------------
 constexpr int8_t kPinMosi = 13;
@@ -91,39 +100,29 @@ constexpr int8_t kPinDc = 2;
 constexpr int8_t kPinRst = -1;
 constexpr int8_t kPinBacklight = 27;
 
-// ILI9341Driver::begin() (TinyGPU) doesn't set orientation - this
-// subclass sends a landscape MADCTL right after begin() (see the file
-// header comment above if the image comes out rotated/mirrored).
-constexpr uint8_t kMadctlLandscape = 0x28;  // MV=1, BGR=1
-
-class ILI9341LandscapeDriver : public ILI9341Driver {
- public:
-  using ILI9341Driver::ILI9341Driver;
-  bool begin() override {
-    if (!ILI9341Driver::begin()) return false;
-    writeCommand(0x36);
-    writeData8(kMadctlLandscape);
-    return true;
-  }
-};
-
-// TinyGPU's Surface only exposes a const data() accessor (for its usual
-// per-pixel setPixel() callers); toRGB565() fills a whole band in one
-// bulk call, so this subclass exposes a mutable pointer into the same
-// buffer instead of copying through a setPixel() loop.
-class DecodeBandSurface : public SurfaceRGB565 {
- public:
-  using SurfaceRGB565::SurfaceRGB565;
-  uint16_t* pixels() { return reinterpret_cast<uint16_t*>(buffer.data()); }
-  size_t pixelCount() const { return buffer.size(); }
-};
-
 TinyH264Decoder<> decoder;
-ILI9341LandscapeDriver tftDriver(SPI, kPinCs, kPinDc, kPinRst);
-DecodeBandSurface band(kDisplayWidth, kBandHeight, FontRGB565);
+ILI9341Driver tftDriver(SPI, kPinCs, kPinDc, kPinRst, ILI9341Driver::Rotation::kLandscape);
+SurfaceRGB565 band(kDisplayWidth, kBandHeight, FontRGB565);
 
 static uint8_t clipBuf[kDisplayTestClipSize];
 static int frameCount = 0;
+
+/*
+ * Timing state. decodeCheckpointUs is reset at the very end of onFrame()
+ * (after the pacing delay()), so the elapsed time until the *next*
+ * onFrame() fires - measured at that call's start - is exactly the time
+ * decoder.write() spent decoding that next picture, with neither the
+ * delay() nor this frame's own convert+push work counted against it
+ * (same reset-after-the-non-decode-work technique DecodeFromProgmem
+ * uses, adapted for the extra delay() this sketch has and it doesn't).
+ * displayUs is measured directly around the band conversion+SPI-push
+ * loop, so it isn't diluted by decode or the pacing delay either.
+ */
+static uint32_t decodeCheckpointUs = 0;
+static uint64_t totalDecodeUs = 0, totalDisplayUs = 0;
+static uint32_t minDecodeUs = 0xFFFFFFFF, maxDecodeUs = 0;
+static uint32_t minDisplayUs = 0xFFFFFFFF, maxDisplayUs = 0;
+static int statsFrameCount = 0;
 
 // One-time full-panel clear so the border around the centered picture
 // isn't leftover power-on garbage. Uses its own transient, panel-width
@@ -152,17 +151,75 @@ static void printFreeHeap(const char* label) {
 // Called once per decoded picture, from inside decoder.write() below.
 // Converts and pushes the picture to the display one band at a time.
 void onFrame(TinyH264Decoder<>& d, void* /*userData*/) {
+  uint32_t decodeUs = micros() - decodeCheckpointUs;
+
+  uint32_t displayStartUs = micros();
   for (int bandY = 0; bandY < kDisplayHeight; bandY += kBandHeight) {
+    // TinyGPU's Surface<RGB565>::pixels() returns tinygpu::RGB565* (a
+    // single uint16_t member, no vtable) - reinterpret_cast to the
+    // uint16_t* toRGB565() writes, matching this project's established
+    // "same binary layout, safe to alias" reasoning for RGB565 buffers.
     size_t written = d.toRGB565(0, bandY, kDisplayWidth, kBandHeight,
-                                band.pixels(), band.pixelCount());
+                                reinterpret_cast<uint16_t*>(band.pixels()),
+                                band.pixelCount());
     if (written == 0) {
       Serial.println("toRGB565() failed (buffer too small?) - stopping.");
       while (true) delay(1000);
     }
     tftDriver.writeData(band, kOffsetX, kOffsetY + bandY);
   }
+  uint32_t displayUs = micros() - displayStartUs;
+
   frameCount++;
+  // The very first frame overall also pays for one-time SPS/PPS parsing
+  // and the picture buffers' first allocation - excluded from the
+  // running stats, matching DecodeFromProgmem's identical exclusion.
+  if (frameCount > 1) {
+    totalDecodeUs += decodeUs;
+    if (decodeUs < minDecodeUs) minDecodeUs = decodeUs;
+    if (decodeUs > maxDecodeUs) maxDecodeUs = decodeUs;
+    totalDisplayUs += displayUs;
+    if (displayUs < minDisplayUs) minDisplayUs = displayUs;
+    if (displayUs > maxDisplayUs) maxDisplayUs = displayUs;
+    statsFrameCount++;
+  }
+
+  uint32_t totalUs = decodeUs + displayUs;
+  Serial.print("Frame ");
+  Serial.print(frameCount);
+  Serial.print(": decode=");
+  Serial.print(decodeUs);
+  Serial.print("us, convert+push=");
+  Serial.print(displayUs);
+  Serial.print("us, total=");
+  Serial.print(totalUs);
+  Serial.print("us (");
+  Serial.print(totalUs > 0 ? 1000000.0f / totalUs : 0.0f, 1);
+  Serial.print(" fps unpaced)");
+  Serial.print(" - free heap: ");
+  Serial.println(ESP.getFreeHeap());
+
+  // Rolling avg/min/max once per completed clip loop, so drift over a
+  // long-running session (thermal throttling, WiFi/SPI contention, ...)
+  // shows up instead of only ever seeing one early snapshot.
+  if (statsFrameCount > 0 && frameCount % kClipFrameCount == 0) {
+    Serial.print("  avg decode=");
+    Serial.print((uint32_t)(totalDecodeUs / statsFrameCount));
+    Serial.print("us (min=");
+    Serial.print(minDecodeUs);
+    Serial.print(", max=");
+    Serial.print(maxDecodeUs);
+    Serial.print("), avg convert+push=");
+    Serial.print((uint32_t)(totalDisplayUs / statsFrameCount));
+    Serial.print("us (min=");
+    Serial.print(minDisplayUs);
+    Serial.print(", max=");
+    Serial.print(maxDisplayUs);
+    Serial.println(")");
+  }
+
   delay(1000 / kClipFps);
+  decodeCheckpointUs = micros();
 }
 
 void setup() {
@@ -191,6 +248,7 @@ void setup() {
   memcpy_P(clipBuf, kDisplayTestClip, kDisplayTestClipSize);
 
   printFreeHeap("Free heap after setup");
+  decodeCheckpointUs = micros();
 }
 
 void loop() {

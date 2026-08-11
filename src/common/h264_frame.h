@@ -239,4 +239,82 @@ inline void convertFrameToYuv420(const Frame<Allocator>& frame, int originX,
   }
 }
 
+/**
+ * Scaled counterpart of the windowed convertFrameToYuv420() above -
+ * `originX`/`originY`/`width`/`height` describe the requested tile *in
+ * the scaled output picture's coordinate space* (scaledWidth x
+ * scaledHeight overall, see TinyH264Decoder::setScaleFactor()/
+ * widthScaled()/heightScaled()), not the decoded picture's own native
+ * resolution. Each output sample (luma and chroma both) is
+ * nearest-neighbor sampled from the decoded picture via the same
+ * integer-ratio mapping h264_rgb.h's scaled RGB converters use - no
+ * floating point, no interpolation. When scaledWidth/scaledHeight equal
+ * frame.width/frame.height (scale factor 1.0, the default), this
+ * delegates straight to the existing unscaled (bulk-memcpy) path above -
+ * zero behavior or performance change for callers who never touch
+ * setScaleFactor(). `originX`/`originY` must be even (chroma is
+ * subsampled 2x); `dst` must have room for width*height +
+ * 2*(width/2)*(height/2) uint8_t entries.
+ */
+template <typename Allocator>
+inline void convertFrameToYuv420(const Frame<Allocator>& frame,
+                                  int scaledWidth, int scaledHeight,
+                                  int originX, int originY, int width,
+                                  int height, uint8_t* dst) {
+  if (scaledWidth == frame.width && scaledHeight == frame.height) {
+    convertFrameToYuv420(frame, originX, originY, width, height, dst);
+    return;
+  }
+  int srcWidth = frame.width;
+  int srcHeight = frame.height;
+  int cWidth = width / 2, cHeight = height / 2;
+  uint8_t* dstY = dst;
+  uint8_t* dstU = dst + (size_t)width * height;
+  uint8_t* dstV = dstU + (size_t)cWidth * cHeight;
+
+  for (int row = 0; row < height; row++) {
+    int py = (int)((int64_t)(originY + row) * srcHeight / scaledHeight);
+    if (py >= srcHeight) py = srcHeight - 1;
+    const uint8_t* srcRow = frame.yRow(py);
+    uint8_t* dstRow = dstY + (size_t)row * width;
+    for (int col = 0; col < width; col++) {
+      int px = (int)((int64_t)(originX + col) * srcWidth / scaledWidth);
+      if (px >= srcWidth) px = srcWidth - 1;
+      dstRow[col] = srcRow[px];
+    }
+  }
+
+  int srcCWidth = srcWidth / 2, srcCHeight = srcHeight / 2;
+  int scaledCWidth = scaledWidth / 2, scaledCHeight = scaledHeight / 2;
+  int cOriginX = originX / 2, cOriginY = originY / 2;
+  for (int row = 0; row < cHeight; row++) {
+    int py = (int)((int64_t)(cOriginY + row) * srcCHeight / scaledCHeight);
+    if (py >= srcCHeight) py = srcCHeight - 1;
+    const uint8_t* srcURow = frame.uRow(py);
+    const uint8_t* srcVRow = frame.vRow(py);
+    uint8_t* dstURow = dstU + (size_t)row * cWidth;
+    uint8_t* dstVRow = dstV + (size_t)row * cWidth;
+    for (int col = 0; col < cWidth; col++) {
+      int px = (int)((int64_t)(cOriginX + col) * srcCWidth / scaledCWidth);
+      if (px >= srcCWidth) px = srcCWidth - 1;
+      dstURow[col] = srcURow[px];
+      dstVRow[col] = srcVRow[px];
+    }
+  }
+}
+
+/**
+ * Whole-picture convenience overload of the scaled/windowed
+ * convertFrameToYuv420() above - `dst` must have room for
+ * scaledWidth*scaledHeight + 2*(scaledWidth/2)*(scaledHeight/2)
+ * uint8_t entries.
+ */
+template <typename Allocator>
+inline void convertFrameToYuv420(const Frame<Allocator>& frame,
+                                  int scaledWidth, int scaledHeight,
+                                  uint8_t* dst) {
+  convertFrameToYuv420(frame, scaledWidth, scaledHeight, 0, 0, scaledWidth,
+                        scaledHeight, dst);
+}
+
 }  // namespace tinyh264

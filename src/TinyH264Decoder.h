@@ -184,6 +184,41 @@ class TinyH264Decoder {
   int strideY() const { return decoder_.frame().strideY; } ///< bytes per row of y()
   int strideUV() const { return decoder_.frame().strideC; } ///< bytes per row of u()/v()
 
+  /**
+   * Sets an output scale factor applied by the toRGB565()/toRGB666()/
+   * toRGB888()/toYUV420() conversion methods below (both whole-frame and
+   * windowed/tiled overloads) - useful when the decoded resolution is
+   * smaller than the target display (e.g. decoding at a lower resolution
+   * to fit a memory-constrained board's heap - see docs/memory-budget.md -
+   * but wanting to fill a bigger physical screen). Does not change how
+   * the bitstream is decoded, y()/u()/v()/width()/height()/getY()/getU()/
+   * getV() - only the conversion methods' *output* dimensions and pixel
+   * sampling. Values above 1.0 upscale, below 1.0 downscale; the default,
+   * 1.0, means "no scaling" and is a true no-op (widthScaled()/heightScaled()
+   * exactly equal width()/height(), and every conversion method's output
+   * is byte-identical to before this method existed - see
+   * test/native/test_scale.cpp). Scaling uses nearest-neighbor sampling
+   * (integer ratio, no interpolation) - matches this library's general
+   * simplicity-over-quality conversion philosophy (see decoder/h264_rgb.h).
+   */
+  void setScaleFactor(float factor) { scaleFactor_ = factor; }
+  /// The current output scale factor - see setScaleFactor().
+  float scaleFactor() const { return scaleFactor_; }
+
+  /**
+   * Scaled picture width/height - what the toXXX() conversion methods'
+   * whole-frame overloads actually produce, and what a windowed/tiled
+   * toXXX() call's x/y/dx/dy are measured against (see setScaleFactor()).
+   * Always even (4:2:0 chroma needs it), rounded from
+   * width()/height() * scaleFactor(). Equal to width()/height() exactly
+   * when scaleFactor() is 1.0 (the default) - width()/height() are
+   * already guaranteed even (H.264 macroblocks are 16x16), so no
+   * rounding actually occurs in that case.
+   */
+  int widthScaled() const { return scaledDimension(width()); }
+  /// See widthScaled().
+  int heightScaled() const { return scaledDimension(height()); }
+
   /*
    * Single-sample convenience accessors, for callers that want one pixel
    * at a time rather than raw plane/stride pointer math - e.g. a simple
@@ -219,24 +254,26 @@ class TinyH264Decoder {
    * Converts the most recently decoded picture to RGB565 (16-bit,
    * 5-6-5 packed, little-endian) into a caller-provided buffer - the
    * format most embedded display libraries (TFT_eSPI, Adafruit_GFX,
-   * LovyanGFX, ...) expect. `dstCapacity` is the buffer's size in
-   * uint16_t entries (not bytes); if it's smaller than width()*height(),
+   * LovyanGFX, ...) expect. Output is widthScaled()*heightScaled() (see
+   * setScaleFactor() - equal to width()*height() at the default scale
+   * factor of 1.0). `dstCapacity` is the buffer's size in uint16_t
+   * entries (not bytes); if it's smaller than widthScaled()*heightScaled(),
    * nothing is written and this returns 0 - checked explicitly rather
    * than trusting the caller sized `dst` correctly, since a raw pointer
    * carries no size information of its own and a mismatch here would
    * otherwise silently corrupt memory past the buffer. On success,
-   * returns the number of uint16_t entries written (width()*height()).
-   * Never allocates on success; write straight into your display's own
-   * framebuffer if it has one, rather than through an intermediate copy.
-   * See decoder/h264_rgb.h for the exact YUV-to-RGB conversion used
-   * (ITU-R BT.601 limited range, cross-checked against ffmpeg's own
-   * conversion to within 1 LSB per channel). Also see toRGB666()/
-   * toRGB888() for 18-bit and full 24-bit color instead.
+   * returns the number of uint16_t entries written. Never allocates on
+   * success; write straight into your display's own framebuffer if it
+   * has one, rather than through an intermediate copy. See
+   * decoder/h264_rgb.h for the exact YUV-to-RGB conversion used (ITU-R
+   * BT.601 limited range, cross-checked against ffmpeg's own conversion
+   * to within 1 LSB per channel). Also see toRGB666()/toRGB888() for
+   * 18-bit and full 24-bit color instead.
    */
   size_t toRGB565(uint16_t* dst, size_t dstCapacity) const {
-    size_t needed = (size_t)width() * (size_t)height();
+    size_t needed = (size_t)widthScaled() * (size_t)heightScaled();
     if (dstCapacity < needed) return 0;
-    convertFrameToRgb565(decoder_.frame(), dst);
+    convertFrameToRgb565(decoder_.frame(), widthScaled(), heightScaled(), dst);
     return needed;
   }
 
@@ -244,23 +281,26 @@ class TinyH264Decoder {
    * Converts a `dx` x `dy` rectangle of the most recently decoded
    * picture, starting at (x, y), to RGB565 into a caller-provided
    * buffer (packed with no row padding - dst's row stride is exactly
-   * dx). `dstCapacity` is checked against dx*dy the same way as the
-   * whole-frame overload above - returns 0 without writing if too
-   * small, or dx*dy on success. Splits the whole-frame conversion into
-   * smaller pieces - e.g.
-   * to push a decoded picture to a display in tiles (matching how many
-   * small-display drivers already expect windowed pushColors() calls),
-   * or to spread the conversion work across multiple loop() iterations
-   * instead of one large blocking call. `x`/`y` must be even (chroma is
-   * subsampled 2x - see decoder/h264_rgb.h) and, together with
-   * dx/dy, must stay within width()/height() - that part is not
-   * bounds-checked (only the destination buffer size is).
+   * dx). `x`/`y`/`dx`/`dy` are measured against the *scaled* picture
+   * (widthScaled() x heightScaled(), see setScaleFactor()), not the native
+   * decode resolution. `dstCapacity` is checked against dx*dy the same
+   * way as the whole-frame overload above - returns 0 without writing if
+   * too small, or dx*dy on success. Splits the whole-frame conversion
+   * into smaller pieces - e.g. to push a decoded picture to a display in
+   * tiles (matching how many small-display drivers already expect
+   * windowed pushColors() calls), or to spread the conversion work
+   * across multiple loop() iterations instead of one large blocking
+   * call. `x`/`y` must be even (chroma is subsampled 2x - see
+   * decoder/h264_rgb.h) and, together with dx/dy, must stay within
+   * widthScaled()/heightScaled() - that part is not bounds-checked (only the
+   * destination buffer size is).
    */
   size_t toRGB565(int x, int y, int dx, int dy, uint16_t* dst,
                   size_t dstCapacity) const {
     size_t needed = (size_t)dx * (size_t)dy;
     if (dstCapacity < needed) return 0;
-    convertFrameToRgb565(decoder_.frame(), x, y, dx, dy, dst);
+    convertFrameToRgb565(decoder_.frame(), widthScaled(), heightScaled(), x, y, dx,
+                         dy, dst);
     return needed;
   }
 
@@ -269,29 +309,32 @@ class TinyH264Decoder {
    * 3 bytes per pixel, R/G/B order, each byte's 6 significant bits
    * left-justified in bits 7:2) into a caller-provided buffer -
    * `dstCapacity` (in uint8_t entries) must be at least
-   * width()*height()*3, checked the same way as toRGB565() (returns 0
-   * without writing if too small, or the number of bytes written on
-   * success). The wire format real 18-bit-interface TFT controllers
-   * (e.g. ILI9488 in 18-bit mode) expect - see decoder/h264_rgb.h for
-   * exactly why this bit layout and how it was verified.
+   * widthScaled()*heightScaled()*3 (see setScaleFactor()), checked the same
+   * way as toRGB565() (returns 0 without writing if too small, or the
+   * number of bytes written on success). The wire format real
+   * 18-bit-interface TFT controllers (e.g. ILI9488 in 18-bit mode)
+   * expect - see decoder/h264_rgb.h for exactly why this bit layout and
+   * how it was verified.
    */
   size_t toRGB666(uint8_t* dst, size_t dstCapacity) const {
-    size_t needed = (size_t)width() * (size_t)height() * 3;
+    size_t needed = (size_t)widthScaled() * (size_t)heightScaled() * 3;
     if (dstCapacity < needed) return 0;
-    convertFrameToRgb666(decoder_.frame(), dst);
+    convertFrameToRgb666(decoder_.frame(), widthScaled(), heightScaled(), dst);
     return needed;
   }
 
   /**
    * Windowed/tiled counterpart of toRGB666() - see toRGB565(x,y,dx,dy,...)
-   * for the tiling rationale and the x/y-must-be-even constraint.
-   * `dstCapacity` must be at least dx*dy*3.
+   * for the tiling rationale, the scaled-coordinate-space semantics, and
+   * the x/y-must-be-even constraint. `dstCapacity` must be at least
+   * dx*dy*3.
    */
   size_t toRGB666(int x, int y, int dx, int dy, uint8_t* dst,
                   size_t dstCapacity) const {
     size_t needed = (size_t)dx * (size_t)dy * 3;
     if (dstCapacity < needed) return 0;
-    convertFrameToRgb666(decoder_.frame(), x, y, dx, dy, dst);
+    convertFrameToRgb666(decoder_.frame(), widthScaled(), heightScaled(), x, y, dx,
+                         dy, dst);
     return needed;
   }
 
@@ -300,27 +343,29 @@ class TinyH264Decoder {
    * 3 bytes per pixel, R/G/B order, full 8-bit precision per channel -
    * matches ffmpeg's `rgb24`) into a caller-provided buffer -
    * `dstCapacity` (in uint8_t entries) must be at least
-   * width()*height()*3, checked the same way as toRGB565() (returns 0
-   * without writing if too small, or the number of bytes written on
-   * success).
+   * widthScaled()*heightScaled()*3 (see setScaleFactor()), checked the same
+   * way as toRGB565() (returns 0 without writing if too small, or the
+   * number of bytes written on success).
    */
   size_t toRGB888(uint8_t* dst, size_t dstCapacity) const {
-    size_t needed = (size_t)width() * (size_t)height() * 3;
+    size_t needed = (size_t)widthScaled() * (size_t)heightScaled() * 3;
     if (dstCapacity < needed) return 0;
-    convertFrameToRgb888(decoder_.frame(), dst);
+    convertFrameToRgb888(decoder_.frame(), widthScaled(), heightScaled(), dst);
     return needed;
   }
 
   /**
    * Windowed/tiled counterpart of toRGB888() - see toRGB565(x,y,dx,dy,...)
-   * for the tiling rationale and the x/y-must-be-even constraint.
-   * `dstCapacity` must be at least dx*dy*3.
+   * for the tiling rationale, the scaled-coordinate-space semantics, and
+   * the x/y-must-be-even constraint. `dstCapacity` must be at least
+   * dx*dy*3.
    */
   size_t toRGB888(int x, int y, int dx, int dy, uint8_t* dst,
                   size_t dstCapacity) const {
     size_t needed = (size_t)dx * (size_t)dy * 3;
     if (dstCapacity < needed) return 0;
-    convertFrameToRgb888(decoder_.frame(), x, y, dx, dy, dst);
+    convertFrameToRgb888(decoder_.frame(), widthScaled(), heightScaled(), x, y, dx,
+                         dy, dst);
     return needed;
   }
 
@@ -329,38 +374,43 @@ class TinyH264Decoder {
    * buffer as one tightly-packed YUV 4:2:0 planar block (standard
    * "I420" layout: Y bytes, then U bytes, then V bytes, no row padding -
    * unlike y()/u()/v() above, which point into this decoder's own
-   * internal frame storage and are only valid until the next picture is
-   * decoded). Useful for handing a whole decoded frame to something that
-   * wants one contiguous buffer - writing it to storage, sending it over
-   * a socket, or queuing it for another thread/task to process later -
-   * rather than three separate plane pointers. `dstCapacity` (in
-   * uint8_t entries) must be at least width()*height() +
-   * 2*(width()/2)*(height()/2); returns 0 without writing if too small,
-   * or the number of bytes written on success - the same size-checking
-   * pattern as toRGB565()/toRGB666()/toRGB888(). Never allocates. See
+   * internal frame storage, are never scaled, and are only valid until
+   * the next picture is decoded). Useful for handing a whole decoded
+   * frame to something that wants one contiguous buffer - writing it to
+   * storage, sending it over a socket, or queuing it for another
+   * thread/task to process later - rather than three separate plane
+   * pointers. Output is widthScaled()*heightScaled() (see setScaleFactor()).
+   * `dstCapacity` (in uint8_t entries) must be at least
+   * widthScaled()*heightScaled() + 2*(widthScaled()/2)*(heightScaled()/2); returns 0
+   * without writing if too small, or the number of bytes written on
+   * success - the same size-checking pattern as
+   * toRGB565()/toRGB666()/toRGB888(). Never allocates. See
    * decoder/h264_frame.h for the exact layout.
    */
   size_t toYUV420(uint8_t* dst, size_t dstCapacity) const {
-    int w = width(), h = height();
+    int w = widthScaled(), h = heightScaled();
     size_t needed = (size_t)w * h + 2 * (size_t)(w / 2) * (size_t)(h / 2);
     if (dstCapacity < needed) return 0;
-    convertFrameToYuv420(decoder_.frame(), dst);
+    convertFrameToYuv420(decoder_.frame(), w, h, dst);
     return needed;
   }
 
   /**
    * Windowed/tiled counterpart of toYUV420() - packs just a `dx` x `dy`
    * rectangle starting at (x, y) instead of the whole picture, the same
-   * tiling rationale as toRGB565(x,y,dx,dy,...). `x`/`y` must be even
-   * (chroma is subsampled 2x) and, together with dx/dy, must stay within
-   * width()/height() - not bounds-checked (only the destination buffer
-   * size is). `dstCapacity` must be at least dx*dy + 2*(dx/2)*(dy/2).
+   * tiling rationale and scaled-coordinate-space semantics as
+   * toRGB565(x,y,dx,dy,...). `x`/`y` must be even (chroma is subsampled
+   * 2x) and, together with dx/dy, must stay within
+   * widthScaled()/heightScaled() - not bounds-checked (only the destination
+   * buffer size is). `dstCapacity` must be at least dx*dy +
+   * 2*(dx/2)*(dy/2).
    */
   size_t toYUV420(int x, int y, int dx, int dy, uint8_t* dst,
                   size_t dstCapacity) const {
     size_t needed = (size_t)dx * dy + 2 * (size_t)(dx / 2) * (size_t)(dy / 2);
     if (dstCapacity < needed) return 0;
-    convertFrameToYuv420(decoder_.frame(), x, y, dx, dy, dst);
+    convertFrameToYuv420(decoder_.frame(), widthScaled(), heightScaled(), x, y, dx,
+                         dy, dst);
     return needed;
   }
 
@@ -384,10 +434,24 @@ class TinyH264Decoder {
     }
   }
 
+  /**
+   * Rounds `nativeDimension * scaleFactor_` to the nearest integer, then
+   * down to the nearest even number (4:2:0 chroma needs an even
+   * dimension) - see widthScaled()/heightScaled(). Floored to 2 rather than 0
+   * so a very small scale factor still produces a valid (if degenerate)
+   * picture instead of a zero-sized one.
+   */
+  int scaledDimension(int nativeDimension) const {
+    int scaled = (int)(nativeDimension * scaleFactor_ + 0.5f);
+    if (scaled < 2) scaled = 2;
+    return scaled & ~1;
+  }
+
   Decoder<Allocator> decoder_;
   FrameCallback callback_ = nullptr;
   void* userData_ = nullptr;
   Status lastStatus_ = Status::kNeedMoreData;
+  float scaleFactor_ = 1.0f;
 };
 
 }  // namespace tinyh264

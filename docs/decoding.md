@@ -140,6 +140,38 @@ depending on what you're doing with the picture:
   maximum, not necessarily this stream's actual resolution - so it can't
   be handed out directly as a tightly-packed buffer in general).
 
+### Scaling the output
+
+`setScaleFactor(float)` scales the output of every conversion method
+above (`toRGB565()`/`toRGB666()`/`toRGB888()`/`toYUV420()`, whole-frame
+and windowed alike) - useful when the decoded resolution is smaller than
+the target display, e.g. decoding at a lower resolution to fit a
+memory-constrained board's heap (see [Memory budget](memory-budget.md))
+but wanting to fill a bigger physical screen:
+
+```cpp
+decoder.setScaleFactor(1.25f);  // e.g. 256x192 decode -> 320x240 display
+uint16_t rgb[320 * 240];
+decoder.toRGB565(rgb, 320 * 240);  // decoder.widthScaled()*heightScaled()
+```
+
+`widthScaled()`/`heightScaled()` report the *scaled* dimensions the
+conversion methods now produce - use these (not `width()`/`height()`,
+which stay tied to the native decoded resolution and drive
+`y()`/`u()`/`v()`/`getY()`/`getU()`/`getV()` unchanged) when sizing a
+destination buffer or computing a windowed tile's `x`/`y`/`dx`/`dy`,
+which are now measured against the scaled picture. The default scale
+factor, 1.0, is a true no-op: `widthScaled()`/`heightScaled()` exactly
+equal `width()`/`height()`, and
+every conversion method's output is byte-identical to never having
+called `setScaleFactor()` at all (verified in
+`test/native/test_scale.cpp`). Scaling always rounds to an even pixel
+count (4:2:0 chroma needs it) and uses nearest-neighbor sampling -
+simple integer-ratio coordinate mapping, no interpolation, matching this
+library's general simplicity-over-quality conversion philosophy (see
+`src/decoder/h264_rgb.h`) - so upscaling by a non-integer factor looks
+blocky rather than smooth.
+
 By default up to `H264_MAX_REF_FRAMES` (3) reference pictures are kept
 resident, matching `ffmpeg`'s own default preset. If you know your source
 stream needs fewer (check with `ffmpeg -i your.264 -c copy -bsf:v

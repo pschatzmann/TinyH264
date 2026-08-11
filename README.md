@@ -37,6 +37,17 @@ deblocking filter) are hand-optimized for any of these targets - see
 for what a profiling-driven optimization pass would likely target first
 if you need more headroom than this.
 
+**Decode + display, real hardware**: `examples/DecodeToDisplay` (256x192,
+decode + RGB565 conversion + SPI push to an ILI9341 TFT, plain ESP32, no
+PSRAM) measured avg decode 56742 us (min 50161, max 79416 - content-
+dependent) and avg convert+push 55324 us (min 55314, max 55349 - a fixed
+SPI-transfer cost, essentially content-independent) - combined, ~112066
+us/frame, ~8.9 fps if run back-to-back with no pacing delay. Slower than
+the QCIF-only figures above since it's 2.9x the pixel count *and*
+includes the display push, not just decode - see that sketch's own
+on-device timing instrumentation for the methodology.
+
+
 ## Containers
 
 `TinyH264Encoder`/`TinyH264Decoder` speak raw H.264 elementary streams

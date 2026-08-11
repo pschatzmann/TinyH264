@@ -185,6 +185,65 @@ inline void convertFrameToRgb565(const Frame<Allocator>& frame, int originX,
 }
 
 /**
+ * Scaled counterpart of the windowed convertFrameToRgb565() above - `x`/
+ * `y`/`width`/`height` describe the requested tile *in the scaled output
+ * picture's coordinate space* (scaledWidth x scaledHeight overall, see
+ * TinyH264Decoder::setScaleFactor()/widthScaled()/heightScaled()), not the
+ * decoded picture's own native resolution. Each output pixel is
+ * nearest-neighbor sampled from the decoded picture (integer ratio,
+ * srcX = outputX * frame.width / scaledWidth, clamped to the last valid
+ * source column/row - no floating point, no interpolation, matching
+ * this project's simplicity-over-quality conversion philosophy
+ * elsewhere). When scaledWidth/scaledHeight equal frame.width/
+ * frame.height (scale factor 1.0, the default), this delegates straight
+ * to the existing unscaled path above - zero behavior or performance
+ * change for callers who never touch setScaleFactor(). `dst` must have
+ * room for width*height uint16_t entries; never allocates.
+ */
+template <typename Allocator>
+inline void convertFrameToRgb565(const Frame<Allocator>& frame,
+                                  int scaledWidth, int scaledHeight, int x,
+                                  int y, int width, int height,
+                                  uint16_t* dst) {
+  if (scaledWidth == frame.width && scaledHeight == frame.height) {
+    convertFrameToRgb565(frame, x, y, width, height, dst);
+    return;
+  }
+  int srcWidth = frame.width;
+  int srcHeight = frame.height;
+  for (int row = 0; row < height; row++) {
+    int py = (int)((int64_t)(y + row) * srcHeight / scaledHeight);
+    if (py >= srcHeight) py = srcHeight - 1;
+    const uint8_t* yRow = frame.yRow(py);
+    const uint8_t* uRow = frame.uRow(py >> 1);
+    const uint8_t* vRow = frame.vRow(py >> 1);
+    uint16_t* dstRow = dst + (size_t)row * width;
+    for (int col = 0; col < width; col++) {
+      int px = (int)((int64_t)(x + col) * srcWidth / scaledWidth);
+      if (px >= srcWidth) px = srcWidth - 1;
+      uint8_t r, g, b;
+      yuvToRgb8(yRow[px], uRow[px >> 1], vRow[px >> 1], &r, &g, &b);
+      dstRow[col] =
+          (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+    }
+  }
+}
+
+/**
+ * Whole-picture convenience overload of the scaled/windowed
+ * convertFrameToRgb565() above - converts the entire scaledWidth x
+ * scaledHeight output picture. `dst` must have room for
+ * scaledWidth*scaledHeight uint16_t entries.
+ */
+template <typename Allocator>
+inline void convertFrameToRgb565(const Frame<Allocator>& frame,
+                                  int scaledWidth, int scaledHeight,
+                                  uint16_t* dst) {
+  convertFrameToRgb565(frame, scaledWidth, scaledHeight, 0, 0, scaledWidth,
+                        scaledHeight, dst);
+}
+
+/**
  * Convenience overload taking a decoded Frame directly (see
  * TinyH264Decoder::toRGB666()) - whole frame.
  */
@@ -209,6 +268,58 @@ inline void convertFrameToRgb666(const Frame<Allocator>& frame, int originX,
 }
 
 /**
+ * Scaled counterpart of the windowed convertFrameToRgb666() above - see
+ * convertFrameToRgb565()'s scaled overload for the exact semantics
+ * (`x`/`y`/`width`/`height` in scaled-output space, nearest-neighbor
+ * sampling, unscaled fast path when scaledWidth/scaledHeight match the
+ * native picture). `dst` must have room for width*height*3 uint8_t
+ * entries.
+ */
+template <typename Allocator>
+inline void convertFrameToRgb666(const Frame<Allocator>& frame,
+                                  int scaledWidth, int scaledHeight, int x,
+                                  int y, int width, int height,
+                                  uint8_t* dst) {
+  if (scaledWidth == frame.width && scaledHeight == frame.height) {
+    convertFrameToRgb666(frame, x, y, width, height, dst);
+    return;
+  }
+  int srcWidth = frame.width;
+  int srcHeight = frame.height;
+  for (int row = 0; row < height; row++) {
+    int py = (int)((int64_t)(y + row) * srcHeight / scaledHeight);
+    if (py >= srcHeight) py = srcHeight - 1;
+    const uint8_t* yRow = frame.yRow(py);
+    const uint8_t* uRow = frame.uRow(py >> 1);
+    const uint8_t* vRow = frame.vRow(py >> 1);
+    uint8_t* dstRow = dst + (size_t)row * width * 3;
+    for (int col = 0; col < width; col++) {
+      int px = (int)((int64_t)(x + col) * srcWidth / scaledWidth);
+      if (px >= srcWidth) px = srcWidth - 1;
+      uint8_t r, g, b;
+      yuvToRgb8(yRow[px], uRow[px >> 1], vRow[px >> 1], &r, &g, &b);
+      uint8_t* p = dstRow + col * 3;
+      p[0] = (uint8_t)(r & 0xFC);
+      p[1] = (uint8_t)(g & 0xFC);
+      p[2] = (uint8_t)(b & 0xFC);
+    }
+  }
+}
+
+/**
+ * Whole-picture convenience overload of the scaled/windowed
+ * convertFrameToRgb666() above - `dst` must have room for
+ * scaledWidth*scaledHeight*3 uint8_t entries.
+ */
+template <typename Allocator>
+inline void convertFrameToRgb666(const Frame<Allocator>& frame,
+                                  int scaledWidth, int scaledHeight,
+                                  uint8_t* dst) {
+  convertFrameToRgb666(frame, scaledWidth, scaledHeight, 0, 0, scaledWidth,
+                        scaledHeight, dst);
+}
+
+/**
  * Convenience overload taking a decoded Frame directly (see
  * TinyH264Decoder::toRGB888()) - whole frame.
  */
@@ -230,6 +341,54 @@ inline void convertFrameToRgb888(const Frame<Allocator>& frame, int originX,
   convertYuv420ToRgb888(frame.y(), frame.strideY, frame.u(),
                          frame.v(), frame.strideC, width, height, dst,
                          originX, originY);
+}
+
+/**
+ * Scaled counterpart of the windowed convertFrameToRgb888() above - see
+ * convertFrameToRgb565()'s scaled overload for the exact semantics
+ * (`x`/`y`/`width`/`height` in scaled-output space, nearest-neighbor
+ * sampling, unscaled fast path when scaledWidth/scaledHeight match the
+ * native picture). `dst` must have room for width*height*3 uint8_t
+ * entries.
+ */
+template <typename Allocator>
+inline void convertFrameToRgb888(const Frame<Allocator>& frame,
+                                  int scaledWidth, int scaledHeight, int x,
+                                  int y, int width, int height,
+                                  uint8_t* dst) {
+  if (scaledWidth == frame.width && scaledHeight == frame.height) {
+    convertFrameToRgb888(frame, x, y, width, height, dst);
+    return;
+  }
+  int srcWidth = frame.width;
+  int srcHeight = frame.height;
+  for (int row = 0; row < height; row++) {
+    int py = (int)((int64_t)(y + row) * srcHeight / scaledHeight);
+    if (py >= srcHeight) py = srcHeight - 1;
+    const uint8_t* yRow = frame.yRow(py);
+    const uint8_t* uRow = frame.uRow(py >> 1);
+    const uint8_t* vRow = frame.vRow(py >> 1);
+    uint8_t* dstRow = dst + (size_t)row * width * 3;
+    for (int col = 0; col < width; col++) {
+      int px = (int)((int64_t)(x + col) * srcWidth / scaledWidth);
+      if (px >= srcWidth) px = srcWidth - 1;
+      uint8_t* p = dstRow + col * 3;
+      yuvToRgb8(yRow[px], uRow[px >> 1], vRow[px >> 1], &p[0], &p[1], &p[2]);
+    }
+  }
+}
+
+/**
+ * Whole-picture convenience overload of the scaled/windowed
+ * convertFrameToRgb888() above - `dst` must have room for
+ * scaledWidth*scaledHeight*3 uint8_t entries.
+ */
+template <typename Allocator>
+inline void convertFrameToRgb888(const Frame<Allocator>& frame,
+                                  int scaledWidth, int scaledHeight,
+                                  uint8_t* dst) {
+  convertFrameToRgb888(frame, scaledWidth, scaledHeight, 0, 0, scaledWidth,
+                        scaledHeight, dst);
 }
 
 }  // namespace tinyh264
