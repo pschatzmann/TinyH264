@@ -93,3 +93,54 @@ for `TinyH264Encoder<PSRAMAllocatorESP32<uint8_t>>`. PSRAM only moves the
 parameter) - the metadata table and scratch buffers described above stay
 on regular heap either way, since they're small enough (tens of KB, not
 hundreds) not to need it.
+
+## Estimated max resolution by board
+
+Decoder-only budget (`setMaxRefFrames(1)`, i.e. 2 resident picture
+buffers, plus the per-macroblock metadata table: ~3.52 bytes/pixel
+combined), solved for the largest ~4:3, macroblock-aligned (multiple of
+16) resolution that leaves **real safety margin** against each board's
+available heap - not the largest that fits at zero margin, which is a
+mistake this project made once already (see the QVGA-crash story in
+git history/`examples/DecodeToDisplay`'s commits): a resolution that
+"just barely" fits on paper is not safe in practice once fragmentation,
+other libraries, and normal runtime overhead are accounted for.
+
+| Board | Total SRAM | Available heap | Max resolution | Confidence |
+|---|---|---|---|---|
+| ESP32 (no PSRAM) | ~520KB | ~284KB | **256x192** | Measured on real hardware (this project's `DecodeToDisplay` example) |
+| ESP32 with PSRAM† | ~520KB + 2-8MB PSRAM | ~284KB internal | **640x480** (VGA) | Speculative - never built/tested past QVGA in this project |
+| ESP32-S3 (no PSRAM) | ~512KB | ~272KB | **256x192** | Estimated - `arduino-cli` static-RAM report only, not measured free-heap |
+| ESP32-S3 with PSRAM† | ~512KB + 2-8MB PSRAM | ~272KB internal | **640x480** (VGA) | Speculative - never built/tested past QVGA in this project |
+| RP2040 | 264KB | ~219KB | **240x160** (HQVGA) | Estimated - `arduino-cli` report only, no RP2040 hardware tested |
+| RP2350 (Pico 2) | 520KB | ~480KB | **320x240** (QVGA) | Estimated - `arduino-cli` report only, no RP2350 hardware tested |
+| STM32H750VBT6 (WeAct) | 1MB* | ~488KB | **320x240** (QVGA) | Estimated - `arduino-cli` report only, no STM32 hardware tested |
+
+† `PSRAMAllocatorESP32<uint8_t>` (see [Decoding](decoding.md#accessing-pixel-data)) only moves the *picture buffers* to PSRAM via the `Allocator` template parameter - `MbInfoTable` (the per-macroblock metadata table) is **not** templated on `Allocator` and always lives on regular internal SRAM, no matter which allocator the decoder uses. So PSRAM doesn't make resolution unconstrained: picture buffers stop being the limiting factor (PSRAM capacity, typically 2-8MB, is vastly more than 2-4 buffers need at any sane resolution), but the metadata table (~0.516 bytes/pixel) and the NAL scratch buffer (`H264_MAX_NAL_SIZE`, 32KB by default) still compete for the same ~270-284KB of internal SRAM as everything else. VGA (640x480) is where that internal-SRAM-only constraint lands with a comparable ~42-44% margin to the rest of this table - but unlike every other row, this project has never actually compiled or run anything past QVGA, so treat this figure as a rough extrapolation, not a validated recommendation. Two things not accounted for in this estimate, worth checking before relying on it: (1) `H264_MAX_NAL_SIZE`'s default (32KB) was sized for QCIF-scale slice data - a 640x480 picture has ~12x QCIF's macroblock count, and may need this raised (a `#define`, itself a static-RAM cost, cutting further into the same internal-SRAM budget - see `h264_config.h`); (2) real PSRAM capacity varies a lot by module (2MB on some boards, 8MB on others) - confirm yours is enough for however many reference frames you configure via `setMaxRefFrames()` before assuming it's a non-issue. RP2040/RP2350/STM32H750 don't get a "with PSRAM" row here because this project doesn't currently implement a PSRAM allocator for those cores - only `PSRAMAllocatorESP32.h` exists today.
+
+\* STM32H750's 1MB SRAM is split across several regions (DTCM, AXI SRAM,
+SRAM1-4); the Arduino core's linker script addresses ~512KB of it as one
+heap-usable pool, which is the figure this table's estimate is based on.
+Its bigger caveat is **flash, not RAM**: only 128KB internal flash (a
+minimal decode-only sketch already uses ~34% of it) - a fuller sketch
+(encode+decode+display together) is unlikely to fit without running code
+from the board's external QSPI flash (XIP), which this project has never
+built or tested against.
+
+**"Available heap" methodology**: for ESP32, this is a real
+`ESP.getFreeHeap()` reading from `examples/DecodeToDisplay` on real
+hardware. For every other board, it's `arduino-cli`'s own
+"leaving N bytes for local variables" static-RAM report for
+`examples/DecodeFromProgmem` (a decode-only sketch) - a real compiler
+output, but not a live free-heap measurement, and it conflates stack and
+heap into one number. Cross-checking the one board with both numbers
+(ESP32: `arduino-cli` estimated ~271KB available, the real device
+measured ~284-293KB) suggests this proxy runs slightly *conservative*
+relative to reality, which is the direction you want an estimate to err
+in - but "estimated" rows in this table have not been run on real
+hardware and should be verified with `arduino-cli`/a real device before
+being relied on, the same way the ESP32 figures in this document were
+established the hard way (see `examples/DecodeToDisplay`'s development
+history for what a `setMaxRefFrames()` oversight or a fragmented-heap
+allocation failure actually looks like at runtime).
+
