@@ -4,7 +4,7 @@ Correctness is validated by decoding real streams generated with
 `ffmpeg`/libx264 and diffing every pixel against `ffmpeg`'s own decode -
 not by conformance-suite guesswork.
 
-Build and run the whole suite (25 tests) with CMake + CTest from the repo
+Build and run the whole suite (31 tests) with CMake + CTest from the repo
 root:
 
 ```sh
@@ -53,7 +53,12 @@ g++ -std=c++17 -O2 -I../../src test_decode_multiframe.cpp -o /tmp/t && /tmp/t
 ```
 
 Other `test_*.cpp` files cover individual layers (bitstream reader, NAL
-parsing, SPS/PPS, slice headers, CAVLC table validity). Test assets
+parsing, SPS/PPS, slice headers, CAVLC table validity) or specific
+behaviors (`test_alloc_failure.cpp`: a mock `Allocator` that fails
+`allocate()` on demand, checking that both `TinyH264Decoder` and
+`TinyH264Encoder` report the failure cleanly - `Status::kAllocationError`/
+a `0` return - rather than crashing; see `src/StdAllocator.h`'s file
+comment). Test assets
 (`assets/*.264`, `assets/*.yuv`) are pre-generated with `ffmpeg`/libx264
 using the same parameters documented in
 [Preparing input with ffmpeg](preparing-input-with-ffmpeg.md) above (the

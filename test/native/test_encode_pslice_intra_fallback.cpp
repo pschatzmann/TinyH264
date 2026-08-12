@@ -68,7 +68,7 @@ int failures = 0;
  * can be compared apples-to-apples against the real encodePFrame() (which
  * makes the real per-macroblock choice) on the same scene-cut input.
  */
-size_t encodePFrameNoFallback(Frame<>& refFrame, MbInfoTable& mbInfo,
+size_t encodePFrameNoFallback(Frame<>& refFrame, MbInfoTable<>& mbInfo,
                                const uint8_t* srcY, int srcStrideY,
                                const uint8_t* srcU, const uint8_t* srcV,
                                int srcStrideC, int qp, uint8_t* dst,
@@ -81,7 +81,7 @@ size_t encodePFrameNoFallback(Frame<>& refFrame, MbInfoTable& mbInfo,
   BitWriter sliceW(sliceScratch, sizeof(sliceScratch));
   writeSliceHeaderP(sliceW, 1, qp, qp);
 
-  MbEncodeContext<std::allocator<uint8_t>> ctx;
+  MbEncodeContext<StdAllocator<uint8_t>> ctx;
   ctx.frame = &outFrame;
   ctx.mbInfo = &mbInfo;
   ctx.chromaQpIndexOffset = 0;
@@ -201,7 +201,7 @@ int main() {
   Frame<> refFrameForBaseline;
   refFrameForBaseline.copyFrom(encBaseline.frame());
   Frame<> outFrame;
-  MbInfoTable mbInfo;
+  MbInfoTable<> mbInfo;
   size_t nb1 = encodePFrameNoFallback(
       refFrameForBaseline, mbInfo, srcY1, W, srcU1, srcV1, W / 2, qp,
       bsBaseline.data() + nb0, bsBaseline.size() - nb0, outFrame);

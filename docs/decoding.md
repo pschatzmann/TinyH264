@@ -5,7 +5,7 @@
 
 using namespace tinyh264;
 
-TinyH264Decoder<> decoder;   // <> = default allocator (std::allocator<uint8_t>, plain heap)
+TinyH264Decoder<> decoder;   // <> = default allocator (StdAllocator<uint8_t>, plain heap)
 
 void onFrame(TinyH264Decoder<> &decoder, void *userData) {
   // decoder.width(), decoder.height()
@@ -24,8 +24,10 @@ void feed(const uint8_t *annexBData, size_t size) {
   // camera module's H.264 output.
   decoder.write(annexBData, size);   // onFrame() fires once per decoded picture
   if (decoder.hasError()) {
-    // decoder.lastStatus() == kUnsupported (unimplemented stream feature)
-    //                      or kError (corrupt/truncated bitstream)
+    // decoder.lastStatus() == kUnsupported (unimplemented stream feature),
+    //                      kError (corrupt/truncated bitstream), or
+    //                      kAllocationError (out of memory - see
+    //                      "Allocation failure handling" below)
   }
 }
 ```
@@ -188,12 +190,13 @@ A stream that actually needs more references than the current
 `maxRefFrames()` (or more than the compile-time `H264_MAX_REF_FRAMES`
 upper bound) is rejected as `kUnsupported`, not mis-decoded.
 
-`TinyH264Decoder` is templated on an allocator (`std::allocator<uint8_t>` by
-default), used for the picture buffers (see [Memory budget](memory-budget.md)).
-Pass a custom allocator to place them in PSRAM or a dedicated pool instead
-of the default heap - `PSRAMAllocatorESP32<uint8_t>` (in
-`PSRAMAllocatorESP32.h`) does this via ESP-IDF's `heap_caps_malloc()`, for
-boards with PSRAM (e.g. most ESP32-S3 modules):
+`TinyH264Decoder` is templated on an allocator (`StdAllocator<uint8_t>` by
+default, see `src/StdAllocator.h`), used for the picture buffers (see
+[Memory budget](memory-budget.md)). Pass a custom allocator to place them
+in PSRAM or a dedicated pool instead of the default heap -
+`PSRAMAllocatorESP32<uint8_t>` (in `PSRAMAllocatorESP32.h`) does this via
+ESP-IDF's `heap_caps_malloc()`, for boards with PSRAM (e.g. most ESP32-S3
+modules):
 
 ```cpp
 #include <TinyH264Decoder.h>
@@ -208,6 +211,29 @@ See `examples/DecodeFromProgmemPSRAM/` for the complete version. With
 PSRAM absorbing the two picture buffers, `H264_MAX_WIDTH`/`H264_MAX_HEIGHT`
 can also be raised beyond QCIF, since they no longer compete with the rest
 of the sketch for internal DRAM.
+
+### Allocation failure handling
+
+Unlike the STL's own `std::allocator`, `StdAllocator` (this library's
+default) never throws `std::bad_alloc` on an out-of-memory condition - it
+returns `nullptr`, and every allocation call site in this library checks
+for that instead of assuming it can't happen. This matters on a
+microcontroller for two reasons: many embedded C++ toolchains build with
+exceptions disabled entirely (a thrown `std::bad_alloc` would call
+`std::terminate()`/abort the process outright, regardless of any
+`try`/`catch`), and even with exceptions enabled, this library's own code
+never used to catch such a throw - it would propagate out uncaught, which
+is also a crash. Instead, an allocation failure - `begin()`'s up-front
+allocation, or the lazy allocation the first `write()` call triggers -
+surfaces as `TinyH264Decoder::Status::kAllocationError` (`hasError()`
+returns true for it, same as `kError`/`kUnsupported`; `begin()` itself
+also returns `false`) so the caller can detect and handle it like any
+other decode failure, rather than the process going down. See
+[Memory budget](memory-budget.md)'s "Allocation failure doesn't crash"
+note, and `StdAllocator.h`'s file comment for the full rationale
+(including why a plain `std::vector` can't safely detect this on its
+own) - `PSRAMAllocatorESP32` follows the same no-throw contract, and a
+custom `Allocator` should too if you supply your own.
 
 See `examples/DecodeFromProgmem/` for a complete, self-contained sketch
 (a tiny embedded test clip - no camera/SD/network needed) that runs on

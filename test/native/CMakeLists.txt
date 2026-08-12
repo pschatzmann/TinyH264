@@ -10,6 +10,7 @@
 # to a glob without a manual re-configure, which silently produces a
 # stale test suite - not worth the convenience for a list this short-lived.
 set(TINYH264_TESTS
+    test_alloc_failure
     test_bitreader
     test_cavlc_tables
     test_decode_debug

@@ -4,7 +4,7 @@
  * stats to Serial. No camera, SD card, or display needed, so this runs
  * unmodified as a smoke test that the library is working - the decoder
  * core is plain portable C++17 with no ESP32-specific dependencies, so
- * this example (default std::allocator<uint8_t> - no PSRAM) builds for
+ * this example (default StdAllocator<uint8_t> - no PSRAM) builds for
  * any Arduino target with enough RAM for the picture buffers. Picture
  * buffers are sized to the compile-time H264_MAX_WIDTH x
  * H264_MAX_HEIGHT budget (see h264_config.h), not this clip's actual

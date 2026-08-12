@@ -1,5 +1,5 @@
 #pragma once
-#include <memory>
+#include "StdAllocator.h"
 #include "encoder/h264_encoder.h"
 #ifdef ESP32
 #include "PSRAMAllocatorESP32.h"
@@ -48,13 +48,16 @@
 // influence *when* a keyframe happens; see Encoder's own file header
 // comment (encoder/h264_encoder.h) for why.
 //
-// The Allocator template parameter (default std::allocator<uint8_t>) is
-// used for the picture buffers this class holds internally (its own
-// closed-loop reconstruction plus the single P-frame reference - see
-// encoder/h264_macroblock_encode.h's MbEncodeContext doc comment for why
-// an encoder needs one at all) - exactly the same PSRAM-placement
-// mechanism TinyH264Decoder offers:
+// The Allocator template parameter (default StdAllocator<uint8_t>, see
+// StdAllocator.h) is used for the picture buffers this class holds
+// internally (its own closed-loop reconstruction plus the single P-frame
+// reference - see encoder/h264_macroblock_encode.h's MbEncodeContext doc
+// comment for why an encoder needs one at all) - exactly the same
+// PSRAM-placement mechanism TinyH264Decoder offers:
 //   TinyH264Encoder<PSRAMAllocatorESP32<uint8_t>> encoder;
+// An out-of-memory allocation failure surfaces as a 0 return from
+// encodeFrame() (and its color-format overloads) or from begin(),
+// instead of crashing - see StdAllocator.h's file comment.
 //
 // See h264_config.h for the resolution budget (H264_MAX_WIDTH/
 // H264_MAX_HEIGHT, shared with TinyH264Decoder).
@@ -70,7 +73,7 @@ namespace tinyh264 {
  * reconstructed-picture buffers are allocated - see the file comment
  * above for the PSRAM usage example.
  */
-template <typename Allocator = std::allocator<uint8_t>>
+template <typename Allocator = StdAllocator<uint8_t>>
 class TinyH264Encoder {
  public:
   /**
@@ -102,10 +105,11 @@ class TinyH264Encoder {
    * since the last one; every other call becomes a P-frame (motion-
    * compensated against the previous picture, no SPS/PPS resent).
    * Returns the number of bytes written to `dst`, or 0 if width/height/
-   * qp are invalid or `dst`'s capacity was too small (same size-checked-
-   * return convention as TinyH264Decoder's to*() converters - nothing
-   * usable is left in `dst` in that case; call again with a bigger
-   * buffer).
+   * qp are invalid, `dst`'s capacity was too small, or a picture buffer
+   * allocation failed (out of memory - see StdAllocator.h) - same size-
+   * checked-return convention as TinyH264Decoder's to*() converters -
+   * nothing usable is left in `dst` in that case; call again with a
+   * bigger buffer).
    */
   size_t encodeFrame(const uint8_t* srcY, const uint8_t* srcU,
                       const uint8_t* srcV, uint8_t* dst, size_t dstCapacity) {
@@ -300,9 +304,11 @@ class TinyH264Encoder {
    * start a fresh, unrelated sequence. Call once, typically from
    * setup(), if you want any allocation failure to surface
    * deterministically before encoding starts rather than mid-stream.
+   * Returns false if allocation failed - out of memory, not a crash -
+   * see StdAllocator.h.
    */
-  void begin(bool reserveColorConversionScratch = false) {
-    encoder_.begin(reserveColorConversionScratch);
+  bool begin(bool reserveColorConversionScratch = false) {
+    return encoder_.begin(reserveColorConversionScratch);
   }
 
   /**

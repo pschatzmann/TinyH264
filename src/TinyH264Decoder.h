@@ -1,5 +1,5 @@
 #pragma once
-#include <memory>
+#include "StdAllocator.h"
 #include "decoder/h264_decoder.h"
 #include "decoder/h264_rgb.h"
 #ifdef ESP32
@@ -23,14 +23,20 @@
  *   decoder.write(annexBBuffer, size);  // one or more complete NAL units;
  *                                       // onFrame() runs once per decoded
  *                                       // picture before write() returns.
- *   if (decoder.hasError()) { ... }     // bitstream error or unsupported
- *                                       // feature during that write() call
+ *   if (decoder.hasError()) { ... }     // bitstream error, unsupported
+ *                                       // feature, or an out-of-memory
+ *                                       // allocation failure - see Status
+ *                                       // below - during that write() call
  *
- * The Allocator template parameter (default std::allocator<uint8_t>) is
- * used for the picture buffers (see h264_frame.h) - pass a custom
- * allocator to place them in PSRAM or a dedicated pool instead of the
- * default heap, e.g. on an ESP32-S3 with PSRAM:
+ * The Allocator template parameter (default StdAllocator<uint8_t>, see
+ * StdAllocator.h) is used for the picture buffers (see h264_frame.h) -
+ * pass a custom allocator to place them in PSRAM or a dedicated pool
+ * instead of the default heap, e.g. on an ESP32-S3 with PSRAM:
  *   TinyH264Decoder<PSRAMAllocatorESP32<uint8_t>> decoder;
+ * Any Allocator used here should follow the same "return nullptr, don't
+ * throw" contract StdAllocator/PSRAMAllocatorESP32 do (see
+ * StdAllocator.h's file comment for why) so an out-of-memory condition
+ * surfaces as Status::kAllocationError instead of crashing.
  *
  * See h264_config.h for the resolution/memory budget (H264_MAX_WIDTH/
  * H264_MAX_HEIGHT default to QCIF, sized for a plain ESP32 without PSRAM).
@@ -47,15 +53,16 @@ namespace tinyh264 {
  * picture buffers (Frame::y/u/v) are allocated - see the file comment
  * above for the PSRAM usage example.
  */
-template <typename Allocator = std::allocator<uint8_t>>
+template <typename Allocator = StdAllocator<uint8_t>>
 class TinyH264Decoder {
  public:
   /// Outcome of the most recent write()/decodeNext() call.
   enum class Status {
-    kFrameReady,    ///< a new picture is ready via width()/height()/y()/u()/v()
-    kNeedMoreData,  ///< call write() with more data and keep decoding
-    kUnsupported,   ///< stream uses an unimplemented feature
-    kError,         ///< corrupt/truncated bitstream
+    kFrameReady,       ///< a new picture is ready via width()/height()/y()/u()/v()
+    kNeedMoreData,     ///< call write() with more data and keep decoding
+    kUnsupported,      ///< stream uses an unimplemented feature
+    kError,            ///< corrupt/truncated bitstream
+    kAllocationError,  ///< a picture buffer allocation failed (out of memory) - see StdAllocator.h; treat this as terminal for the current decoder instance the same way kError is
   };
 
   /**
@@ -118,10 +125,13 @@ class TinyH264Decoder {
    * their own if this was never called). Call once, typically from
    * setup(), if you want any allocation failure to surface
    * deterministically before the stream starts rather than mid-decode.
+   * Returns false (and sets lastStatus() to kAllocationError) if
+   * allocation failed - out of memory, not a crash - see StdAllocator.h.
    */
-  void begin() { 
-    lastStatus_ = Status::kNeedMoreData;
-    decoder_.begin(); 
+  bool begin() {
+    bool ok = decoder_.begin();
+    lastStatus_ = ok ? Status::kNeedMoreData : Status::kAllocationError;
+    return ok;
   }
 
   /**
@@ -145,8 +155,9 @@ class TinyH264Decoder {
    * call. Returns the status of the *last* thing that happened while
    * draining the buffer: kFrameReady if the last NAL produced a picture,
    * kNeedMoreData once the buffer is fully drained with nothing pending,
-   * or kUnsupported/kError if decoding stopped early because of one -
-   * same value as lastStatus() would give right after this call.
+   * or kUnsupported/kError/kAllocationError if decoding stopped early
+   * because of one - same value as lastStatus() would give right after
+   * this call.
    */
   Status write(const uint8_t* data, size_t size) {
     decoder_.setInput(data, size);
@@ -170,7 +181,7 @@ class TinyH264Decoder {
         }
         continue;
       }
-      lastStatus_ = toStatus(raw);  // kError / kUnsupported
+      lastStatus_ = toStatus(raw);  // kError / kUnsupported / kAllocationError
       break;
     }
     return lastStatus_;
@@ -186,9 +197,10 @@ class TinyH264Decoder {
 
   /// The Status returned by the most recent write() or decodeNext() call.
   Status lastStatus() const { return lastStatus_; }
-  /// True if the most recent call ended in kError or kUnsupported.
+  /// True if the most recent call ended in kError, kUnsupported, or kAllocationError.
   bool hasError() const {
-    return lastStatus_ == Status::kError || lastStatus_ == Status::kUnsupported;
+    return lastStatus_ == Status::kError || lastStatus_ == Status::kUnsupported ||
+           lastStatus_ == Status::kAllocationError;
   }
 
   /*
@@ -447,6 +459,8 @@ class TinyH264Decoder {
         return Status::kNeedMoreData;
       case DecodeStatus::kUnsupported:
         return Status::kUnsupported;
+      case DecodeStatus::kAllocationError:
+        return Status::kAllocationError;
       case DecodeStatus::kError:
       default:
         return Status::kError;

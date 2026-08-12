@@ -42,7 +42,9 @@ for (...) {
   // against the previous picture (just the P-slice, no SPS/PPS resent).
   size_t n = encoder.encodeFrame(y, u, v, bitstream, sizeof(bitstream));
   if (n == 0) {
-    // buffer too small, or width/height not a multiple of 16
+    // buffer too small, width/height not a multiple of 16, or a picture
+    // buffer allocation failed (out of memory - see "Allocation failure
+    // handling" below; not a crash)
   }
   // bitstream[0..n) is a complete Annex-B NAL unit (or units) - decodable
   // by this library's own TinyH264Decoder or any conformant H.264
@@ -215,6 +217,19 @@ these RGB/YUV422 methods (matching `Frame`'s own allocate-on-first-use
 convention, or eagerly via `begin(true)` - see
 [Memory budget](memory-budget.md)) - calling only the plain
 `encodeFrame()` never pays for them.
+
+### Allocation failure handling
+
+`TinyH264Encoder` is templated on an allocator (`StdAllocator<uint8_t>`
+by default, see `src/StdAllocator.h`) the same way `TinyH264Decoder` is -
+see [Decoding](decoding.md#allocation-failure-handling) for the full
+rationale. Unlike `std::allocator`, it never throws `std::bad_alloc` on
+an out-of-memory condition; instead, every `encodeFrame()`-family call
+(and its color-format overloads) reports it the same way a too-small
+`dst` buffer or invalid width/height/qp already were - a `0` return, with
+nothing usable written to `dst` - and `begin()` returns `false`. No new
+failure mode for callers to handle differently; an existing "did this
+call actually produce output?" check already covers it.
 
 Verified round-trip against real `ffmpeg` decode: I-frames bit-exact at
 QP 18 and above across the whole QP range 0-51, within +/-1 (a handful

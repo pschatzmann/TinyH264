@@ -184,8 +184,9 @@ inline int boundaryStrength(const MacroblockInfo& p, int pBlk,
  * edges but skip the MB boundary specifically when the neighbor is in a
  * different slice.
  */
+template <typename Allocator>
 inline bool mbEdgeFilterable(const MacroblockInfo& mb, uint8_t mbSliceId,
-                              const MbInfoTable& mbInfo, int neighborX,
+                              const MbInfoTable<Allocator>& mbInfo, int neighborX,
                               int neighborY) {
   if (mb.disableDeblockIdc == 1) return false;
   if (mb.disableDeblockIdc == 2) {
@@ -207,7 +208,7 @@ inline bool mbEdgeFilterable(const MacroblockInfo& mb, uint8_t mbSliceId,
  * disable_deblocking_filter_idc == 2.
  */
 template <typename Allocator>
-inline void deblockPicture(Frame<Allocator>& frame, MbInfoTable& mbInfo,
+inline void deblockPicture(Frame<Allocator>& frame, MbInfoTable<Allocator>& mbInfo,
                             const Pps& pps) {
   int mbWidth = mbInfo.mbWidth(), mbHeight = mbInfo.mbHeight();
 

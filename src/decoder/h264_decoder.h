@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
-#include <memory>
 #include <utility>
+#include "../StdAllocator.h"
 #include "h264_config.h"
 #include "h264_deblock.h"
 #include "../common/h264_frame.h"
@@ -24,10 +24,13 @@
  * unsupported by parseSliceHeader() (h264_slice_header.h) rather than
  * implemented.
  *
- * Templated on Allocator (default std::allocator<uint8_t>, propagated from
- * TinyH264Decoder<Allocator>) purely because it owns curFrame_ plus an
- * array of reference Frame<Allocator> pictures; see h264_frame.h for why
- * the frame buffers are allocator-parameterized in the first place.
+ * Templated on Allocator (default StdAllocator<uint8_t>, see
+ * StdAllocator.h, propagated from TinyH264Decoder<Allocator>) purely
+ * because it owns curFrame_ plus an array of reference Frame<Allocator>
+ * pictures; see h264_frame.h for why the frame buffers are
+ * allocator-parameterized in the first place. An allocation failure (out
+ * of memory) is reported as DecodeStatus::kAllocationError rather than
+ * crashing - see StdAllocator.h's file comment for the mechanics.
  */
 
 namespace tinyh264 {
@@ -38,6 +41,7 @@ enum class DecodeStatus {
   kNeedMoreData, ///< this NAL wasn't a picture (SPS/PPS/SEI/etc.), keep going
   kUnsupported,  ///< stream uses a feature this decoder doesn't implement
   kError,        ///< corrupt/truncated bitstream
+  kAllocationError, ///< a picture buffer allocation failed (out of memory) - see StdAllocator.h; not a bitstream problem, but treated as terminal the same way kError is
 };
 
 /**
@@ -49,7 +53,7 @@ enum class DecodeStatus {
  * should use that instead of this class directly, unless they want to
  * drive NAL-by-NAL decoding themselves without the callback wrapper.
  */
-template <typename Allocator = std::allocator<uint8_t>>
+template <typename Allocator = StdAllocator<uint8_t>>
 class Decoder {
  public:
   Decoder() : nalReader_(nalScratch_, sizeof(nalScratch_)) {}
@@ -186,13 +190,18 @@ class Decoder {
    * deterministically during setup() rather than mid-stream, and to know
    * the decoder's full resident memory footprint is already committed
    * before the first real frame arrives. Safe to call more than once
-   * (Frame::ensureAllocated() is itself idempotent).
+   * (Frame::ensureAllocated() is itself idempotent). Returns false if any
+   * allocation failed (out of memory) - see StdAllocator.h; whichever
+   * buffers succeeded before the first failure are left allocated
+   * (harmless - end() releases them, or a retried begin() call skips them
+   * and just attempts the rest again).
    */
-  void begin() {
-    curFrame_.ensureAllocated();
+  bool begin() {
+    bool ok = curFrame_.ensureAllocated();
     for (int i = 0; i < H264_MAX_REF_FRAMES; i++) {
-      refFrames_[i].ensureAllocated();
+      ok = refFrames_[i].ensureAllocated() && ok;
     }
+    return ok;
   }
 
   /**
@@ -281,8 +290,12 @@ class Decoder {
     }
 
     if (sh.firstMbInSlice == 0) {
-      mbInfo_.reset(sps.picWidthInMbs, sps.picHeightInMbs);
-      curFrame_.setSize((int)sps.codedWidth, (int)sps.codedHeight);
+      if (!mbInfo_.reset(sps.picWidthInMbs, sps.picHeightInMbs)) {
+        return DecodeStatus::kAllocationError;
+      }
+      if (!curFrame_.setSize((int)sps.codedWidth, (int)sps.codedHeight)) {
+        return DecodeStatus::kAllocationError;
+      }
       sliceCount_ = 0;
     }
     int sliceId = sliceCount_++;
@@ -355,7 +368,7 @@ class Decoder {
          * shifting older entries back; if already at the runtime cap,
          * the oldest (last) entry is evicted first. The shift is done
          * with std::swap rather than Frame::copyFrom() - Frame's
-         * y/u/v members are std::vector, so swapping is an O(1)
+         * y/u/v members are Buffer<Allocator>, so swapping is an O(1)
          * pointer exchange, not a ~38KB+ memcpy; only the actual new
          * entry (refFrames_[0] <- curFrame_) needs a real copy, exactly
          * one per stored reference picture regardless of maxRefFrames_.
@@ -365,7 +378,20 @@ class Decoder {
         for (int i = keep; i > 0; i--) {
           std::swap(refFrames_[i], refFrames_[i - 1]);
         }
-        refFrames_[0].copyFrom(curFrame_);
+        /*
+         * copyFrom() can only fail (out of memory) the first time a given
+         * refFrames_[0] slot is ever populated - once allocated, its
+         * storage is kept for the life of the Decoder (see Buffer::
+         * release()'s only other caller, end()), so ensureAllocated()
+         * inside copyFrom() is a no-op on every later call. Reported as
+         * kAllocationError rather than kOk: curFrame_ itself decoded
+         * successfully, but silently delivering it while failing to
+         * store it as a reference would let a later P-slice reference a
+         * picture that was never actually saved - "detect and reject,
+         * don't guess" (see this file's own DecodeStatus::kUnsupported
+         * policy) applies here too.
+         */
+        if (!refFrames_[0].copyFrom(curFrame_)) return DecodeStatus::kAllocationError;
         refFrameCount_ = keep + 1;
       }
       return DecodeStatus::kOk;
@@ -395,7 +421,7 @@ class Decoder {
   bool haveSps_ = false, havePps_ = false; ///< true once at least one SPS/PPS has been parsed
   bool inputExhausted_ = false; ///< mirrors inputExhausted()
 
-  MbInfoTable mbInfo_;         ///< per-picture macroblock metadata (see h264_mb_info.h)
+  MbInfoTable<Allocator> mbInfo_;  ///< per-picture macroblock metadata (see h264_mb_info.h)
   Frame<Allocator> curFrame_;  ///< picture currently being reconstructed
   /**
    * Stored reference pictures, index 0 = most recently decoded (clause

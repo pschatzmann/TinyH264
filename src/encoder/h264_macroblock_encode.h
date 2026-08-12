@@ -54,7 +54,7 @@ namespace tinyh264 {
 template <typename Allocator>
 struct MbEncodeContext {
   Frame<Allocator>* frame;
-  MbInfoTable* mbInfo;
+  MbInfoTable<Allocator>* mbInfo;
   int chromaQpIndexOffset;
   int sliceId;
   int mbX, mbY;

@@ -1,8 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
-#include <memory>
-#include <vector>
+#include "../StdAllocator.h"
 #include "h264_bitwriter.h"
 #include "h264_color_convert.h"
 #include "h264_macroblock_encode.h"
@@ -59,14 +58,18 @@ namespace tinyh264 {
 
 /**
  * Encodes one Baseline-profile CAVLC picture at a time into a real H.264
- * Annex-B stream. Templated on Allocator exactly like decoder::Decoder,
- * for the same reason: the two Frame<Allocator> objects this class holds
- * (the closed-loop reconstruction plus the single P-frame reference -
- * see h264_macroblock_encode.h's MbEncodeContext doc comment for why an
- * encoder needs one at all) can be placed in PSRAM via a custom
- * allocator on boards that have it.
+ * Annex-B stream. Templated on Allocator (default StdAllocator<uint8_t>,
+ * see StdAllocator.h) exactly like decoder::Decoder, for the same reason:
+ * the two Frame<Allocator> objects this class holds (the closed-loop
+ * reconstruction plus the single P-frame reference - see
+ * h264_macroblock_encode.h's MbEncodeContext doc comment for why an
+ * encoder needs one at all) can be placed in PSRAM via a custom allocator
+ * on boards that have it. An allocation failure (out of memory) is
+ * reported as a 0 return from encodeFrame() (and its color-format
+ * overloads) rather than crashing - see StdAllocator.h's file comment
+ * for the mechanics.
  */
-template <typename Allocator = std::allocator<uint8_t>>
+template <typename Allocator = StdAllocator<uint8_t>>
 class Encoder {
  public:
   /**
@@ -384,12 +387,9 @@ class Encoder {
     refFrame_.setMaxDimension(maxWidth, maxHeight);
     mbInfo_.setMaxDimension(maxWidth, maxHeight);
     if (!yuvY_.empty()) {
-      yuvY_.clear();
-      yuvY_.shrink_to_fit();
-      yuvU_.clear();
-      yuvU_.shrink_to_fit();
-      yuvV_.clear();
-      yuvV_.shrink_to_fit();
+      yuvY_.release();
+      yuvU_.release();
+      yuvV_.release();
     }
   }
   /// The current allocation-ceiling width - see setMaxDimension().
@@ -426,15 +426,19 @@ class Encoder {
    * writes into the same fields, and should work whether called before
    * or after begin()), so it's safe to call again to start a fresh,
    * unrelated sequence. Safe to call more than once
-   * (Frame::ensureAllocated() is itself idempotent).
+   * (Frame::ensureAllocated() is itself idempotent). Returns false if any
+   * allocation failed (out of memory) - see StdAllocator.h; whichever
+   * buffers succeeded are left allocated (harmless - end() releases
+   * them, or a retried begin() call just attempts the rest again).
    */
-  void begin(bool reserveColorConversionScratch = false) {
-    frame_.ensureAllocated();
-    refFrame_.ensureAllocated();
-    if (reserveColorConversionScratch) ensureYuvScratchAllocated();
+  bool begin(bool reserveColorConversionScratch = false) {
+    bool ok = frame_.ensureAllocated();
+    ok = refFrame_.ensureAllocated() && ok;
+    if (reserveColorConversionScratch) ok = ensureYuvScratchAllocated() && ok;
     haveReference_ = false;
     frameNum_ = 0;
     framesSinceKeyframe_ = 0;
+    return ok;
   }
 
   /**
@@ -462,12 +466,9 @@ class Encoder {
   void end() {
     frame_.release();
     refFrame_.release();
-    yuvY_.clear();
-    yuvY_.shrink_to_fit();
-    yuvU_.clear();
-    yuvU_.shrink_to_fit();
-    yuvV_.clear();
-    yuvV_.shrink_to_fit();
+    yuvY_.release();
+    yuvU_.release();
+    yuvV_.release();
     haveReference_ = false;
     frameNum_ = 0;
     width_ = height_ = 0;
@@ -502,10 +503,12 @@ class Encoder {
    * before ever passing -1, or this returns 0. Returns the number of
    * bytes written to `dst`, or 0 if `width`/`height` aren't valid, `qp`
    * is invalid (neither -1 nor 0-51, or -1 without a configured target),
-   * or `dstCapacity` was too small (mirrors TinyH264Decoder's to*()
-   * converters' size-checked-return convention; nothing is written to
-   * `dst` in the too-small case, though the internal reconstructed-
-   * picture state may still have been updated - call again with a
+   * the picture buffer allocation failed (out of memory - see
+   * StdAllocator.h), or `dstCapacity` was too small (mirrors
+   * TinyH264Decoder's to*() converters' size-checked-return convention;
+   * nothing is written to `dst` in the too-small case, though the
+   * internal reconstructed-picture state may still have been updated -
+   * call again with a
    * bigger buffer rather than trying to resume).
    */
   size_t encodeIFrame(const uint8_t* srcY, int srcStrideY, const uint8_t* srcU,
@@ -516,10 +519,9 @@ class Encoder {
     }
     if (width > maxWidth_ || height > maxHeight_) return 0;
     if (!resolveQp(&qp)) return 0;
-
-    frame_.setSize(width, height);
+    if (!frame_.setSize(width, height)) return 0;  // out of memory - see StdAllocator.h
     int mbWidth = width / 16, mbHeight = height / 16;
-    mbInfo_.reset(mbWidth, mbHeight);
+    if (!mbInfo_.reset(mbWidth, mbHeight)) return 0;  // out of memory - see StdAllocator.h
     width_ = width;
     height_ = height;
 
@@ -611,7 +613,14 @@ class Encoder {
     pps.chromaQpIndexOffset = 0;
     deblockPicture(frame_, mbInfo_, pps);
 
-    refFrame_.copyFrom(frame_);
+    // Out of memory (the very first refFrame_.copyFrom() call, before any
+    // prior successful call has left it allocated - see h264_decoder.h's
+    // analogous copyFrom() comment): the encoded bitstream in `dst` is
+    // already valid and fully written, but this picture can't be used as
+    // a reference for the next encodePFrame() call - report the same
+    // failure a bad width/height/qp would (return 0), rather than
+    // returning a byte count with no usable reference behind it.
+    if (!refFrame_.copyFrom(frame_)) return 0;
     haveReference_ = true;
     frameNum_ = 1;  // next call's frame_num - this IDR itself used 0
 
@@ -630,8 +639,9 @@ class Encoder {
    * dimensions mid-sequence without a new SPS, which needs a fresh
    * encodeIFrame() call instead). Returns 0 if no prior encodeIFrame()
    * has established a reference yet, or (same as encodeIFrame()) if
-   * `dstCapacity` was too small. Same `qp = -1` rate-control sentinel as
-   * encodeIFrame().
+   * `dstCapacity` was too small or the reference-picture allocation
+   * failed (out of memory - see StdAllocator.h). Same `qp = -1`
+   * rate-control sentinel as encodeIFrame().
    */
   size_t encodePFrame(const uint8_t* srcY, int srcStrideY, const uint8_t* srcU,
                        const uint8_t* srcV, int srcStrideC, int qp,
@@ -639,9 +649,16 @@ class Encoder {
     if (!haveReference_) return 0;
     if (!resolveQp(&qp)) return 0;
     int width = width_, height = height_;
-    frame_.setSize(width, height);
+    // frame_ is already allocated whenever haveReference_ is true (the
+    // prior encodeIFrame() call already succeeded at this exact
+    // setSize()), so this can't actually fail here - checked anyway for
+    // consistency with setSize()'s new bool contract.
+    if (!frame_.setSize(width, height)) return 0;
     int mbWidth = width / 16, mbHeight = height / 16;
-    mbInfo_.reset(mbWidth, mbHeight);
+    // mbInfo_ is likewise already allocated whenever haveReference_ is
+    // true (the prior encodeIFrame() call's own reset() already
+    // succeeded) - checked anyway for the same consistency reason.
+    if (!mbInfo_.reset(mbWidth, mbHeight)) return 0;
 
     BitWriter sliceW(sliceScratch_, sizeof(sliceScratch_));
     writeSliceHeaderP(sliceW, frameNum_, qp, ppsBaseQp_);
@@ -795,7 +812,12 @@ class Encoder {
     pps.chromaQpIndexOffset = 0;
     deblockPicture(frame_, mbInfo_, pps);
 
-    refFrame_.copyFrom(frame_);
+    // refFrame_ is already allocated whenever haveReference_ is true (see
+    // encodeIFrame()'s own copyFrom() call, which already succeeded to
+    // get here) - checked anyway for consistency with copyFrom()'s new
+    // bool contract; same "bitstream already written, but don't trust
+    // this call's output" rationale as encodeIFrame()'s copyFrom() check.
+    if (!refFrame_.copyFrom(frame_)) return 0;
     frameNum_ = (frameNum_ + 1) & 0xFF;  // 8 bits (log2_max_frame_num_minus4==4)
 
     updateRateControl(o);
@@ -1015,10 +1037,10 @@ class Encoder {
    * callers who only ever use the plain YUV-planes encodeFrame()
    * shouldn't unconditionally pay ~38KB of static RAM for conversion
    * buffers they never touch. Same one-time-allocate-then-reuse idiom as
-   * Frame::ensureAllocated() (h264_frame.h): a `std::vector<uint8_t,
-   * Allocator>` resized once, not a per-call allocation in the hot path,
-   * and using the same Allocator template parameter so it can be placed
-   * in PSRAM alongside frame_ on boards that have it.
+   * Frame::ensureAllocated() (h264_frame.h): a `Buffer<uint8_t, Allocator>`
+   * allocated once, not a per-call allocation in the hot path, and using
+   * the same Allocator template parameter so it can be placed in PSRAM
+   * alongside frame_ on boards that have it.
    */
   bool prepareYuvScratch(int width, int height) {
     if (width <= 0 || height <= 0 || (width % 16) != 0 ||
@@ -1026,8 +1048,7 @@ class Encoder {
       return false;
     }
     if (width > maxWidth_ || height > maxHeight_) return false;
-    ensureYuvScratchAllocated();
-    return true;
+    return ensureYuvScratchAllocated();
   }
 
   /**
@@ -1035,12 +1056,21 @@ class Encoder {
    * begin() can also trigger it eagerly (see begin()'s own comment)
    * without duplicating the resize logic or its width/height validation
    * (irrelevant when called from begin(), which has no picture yet).
+   * Returns false - without crashing - if the allocator (see
+   * StdAllocator.h) couldn't satisfy one of the three allocations.
    */
-  void ensureYuvScratchAllocated() {
-    if (!yuvY_.empty()) return;
-    yuvY_.resize((size_t)maxWidth_ * maxHeight_);
-    yuvU_.resize((size_t)(maxWidth_ / 2) * (maxHeight_ / 2));
-    yuvV_.resize((size_t)(maxWidth_ / 2) * (maxHeight_ / 2));
+  bool ensureYuvScratchAllocated() {
+    if (!yuvY_.empty()) return true;
+    bool ok = yuvY_.allocate((size_t)maxWidth_ * maxHeight_) &&
+              yuvU_.allocate((size_t)(maxWidth_ / 2) * (maxHeight_ / 2)) &&
+              yuvV_.allocate((size_t)(maxWidth_ / 2) * (maxHeight_ / 2));
+    if (!ok) {
+      yuvY_.release();
+      yuvU_.release();
+      yuvV_.release();
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -1104,11 +1134,11 @@ class Encoder {
   }
 
   Frame<Allocator> frame_;
-  MbInfoTable mbInfo_;
+  MbInfoTable<Allocator> mbInfo_;
   uint8_t sliceScratch_[H264_MAX_NAL_SIZE];
-  std::vector<uint8_t, Allocator> yuvY_;
-  std::vector<uint8_t, Allocator> yuvU_;
-  std::vector<uint8_t, Allocator> yuvV_;
+  Buffer<uint8_t, Allocator> yuvY_;
+  Buffer<uint8_t, Allocator> yuvU_;
+  Buffer<uint8_t, Allocator> yuvV_;
 
   /*
    * P-frame state: the single reference picture (this milestone's only

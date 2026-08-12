@@ -5,7 +5,6 @@
 #include <esp_heap_caps.h>
 #include <cstddef>
 #include <cstdlib>
-#include <new>
 
 /*
  * A minimal C++ Allocator (usable as std::vector's second template
@@ -14,7 +13,8 @@
  * TinyH264Decoder<PSRAMAllocatorESP32<uint8_t>> on boards that have PSRAM
  * (e.g. ESP32-S3 modules with octal/quad PSRAM) - a plain ESP32 without
  * PSRAM should keep using the default TinyH264Decoder<> (regular heap),
- * see h264_config.h for the memory budget that implies.
+ * see h264_config.h for the memory budget that implies. Made no-throw -
+ * see below - alongside StdAllocator.h's addition.
  *
  * Usage:
  *   #include <PSRAMAllocatorESP32.h>
@@ -31,6 +31,14 @@
  * heap_caps_free() for both cases is safe on ESP-IDF: malloc() is itself
  * backed by the same heap_caps/multi_heap registry, so heap_caps_free()
  * correctly frees pointers regardless of which of the two allocated them.
+ *
+ * @note allocate() returns nullptr rather than throwing std::bad_alloc on
+ * failure (even if both the PSRAM and regular-heap fallback attempts
+ * fail) - the same no-throw contract StdAllocator.h's StdAllocator
+ * follows and for the same reason (see that file's comment): it lets
+ * common/h264_frame.h's Buffer<Allocator> detect and report an allocation
+ * failure as DecodeStatus::kAllocationError instead of crashing, on every
+ * toolchain regardless of whether C++ exceptions are enabled.
  */
 
 namespace tinyh264 {
@@ -65,15 +73,14 @@ class PSRAMAllocatorESP32 {
    * Allocates storage for `n` objects of type T. Tries PSRAM first
    * (MALLOC_CAP_SPIRAM); if that fails (no PSRAM on this board, or it's
    * exhausted), falls back to the regular heap via malloc() so the
-   * decoder still runs, just without the PSRAM benefit. Throws
-   * std::bad_alloc() if both attempts fail, or if `n` would overflow the
+   * decoder still runs, just without the PSRAM benefit. Returns nullptr -
+   * never throws - if both attempts fail, or if `n` would overflow the
    * byte-size multiplication.
    */
-  T* allocate(std::size_t n) {
-    if (n > (std::size_t(-1) / sizeof(T))) throw std::bad_alloc();
+  T* allocate(std::size_t n) noexcept {
+    if (n > (std::size_t(-1) / sizeof(T))) return nullptr;
     void* p = heap_caps_malloc(n * sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!p) p = malloc(n * sizeof(T));  // fallback to regular heap if PSRAM is exhausted
-    if (!p) throw std::bad_alloc();
     return static_cast<T*>(p);
   }
 

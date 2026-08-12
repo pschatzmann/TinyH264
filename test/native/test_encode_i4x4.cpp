@@ -67,7 +67,7 @@ size_t encodeAlwaysI16x16(const uint8_t* srcY, int srcStrideY,
   Frame<> frame;
   frame.setSize(width, height);
   int mbWidth = width / 16, mbHeight = height / 16;
-  MbInfoTable mbInfo;
+  MbInfoTable<> mbInfo;
   mbInfo.reset(mbWidth, mbHeight);
 
   size_t o = 0;
@@ -90,7 +90,7 @@ size_t encodeAlwaysI16x16(const uint8_t* srcY, int srcStrideY,
   BitWriter sliceW(sliceScratch, sizeof(sliceScratch));
   writeSliceHeaderIdr(sliceW);
 
-  MbEncodeContext<std::allocator<uint8_t>> ctx;
+  MbEncodeContext<StdAllocator<uint8_t>> ctx;
   ctx.frame = &frame;
   ctx.mbInfo = &mbInfo;
   ctx.chromaQpIndexOffset = 0;

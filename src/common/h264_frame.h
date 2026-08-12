@@ -1,8 +1,8 @@
 #pragma once
 #include <stdint.h>
 #include <string.h>
-#include <memory>
-#include <vector>
+#include "../StdAllocator.h"
+#include "h264_buffer.h"
 #include "h264_config.h"
 
 /*
@@ -13,8 +13,8 @@
  * Decoder/Encoder instance via setMaxDimension(), see h264_decoder.h/
  * h264_encoder.h).
  *
- * Y, U, and V live in *three separate* std::vector<uint8_t, Allocator>
- * buffers rather than one merged contiguous allocation. A merged buffer
+ * Y, U, and V live in *three separate* Buffer<uint8_t, Allocator> buffers
+ * (h264_buffer.h) rather than one merged contiguous allocation. A merged buffer
  * was tried first (one allocator call per Frame, whole picture DMA/bulk-
  * copy friendly), but at larger resolutions (e.g. QVGA, 115200 bytes for
  * one frame) that single allocation can exceed the *largest available
@@ -34,11 +34,11 @@
  * actually compiling the example against esp32:esp32 with arduino-cli,
  * not just by the theoretical budget math in h264_config.h. The
  * Allocator template parameter (propagated from
- * TinyH264Decoder<Allocator>, default std::allocator<uint8_t>) lets
- * callers point these buffers at PSRAM or a custom pool instead of the
- * default heap, without touching decoder internals. Sizing happens once
- * at startup, never per-frame, so this doesn't reintroduce allocation
- * into the decode hot path.
+ * TinyH264Decoder<Allocator>, default StdAllocator<uint8_t> - see
+ * StdAllocator.h) lets callers point these buffers at PSRAM or a custom
+ * pool instead of the default heap, without touching decoder internals.
+ * Sizing happens once at startup, never per-frame, so this doesn't
+ * reintroduce allocation into the decode hot path.
  */
 
 namespace tinyh264 {
@@ -50,9 +50,10 @@ namespace tinyh264 {
  * these resident: the picture currently being reconstructed, plus up to
  * H264_MAX_REF_FRAMES stored reference pictures. The Allocator template
  * parameter controls where the backing storage lives (regular heap by
- * default; see PSRAMAllocatorESP32.h to place it in PSRAM instead).
+ * default via StdAllocator, see StdAllocator.h; see PSRAMAllocatorESP32.h
+ * to place it in PSRAM instead).
  */
-template <typename Allocator = std::allocator<uint8_t>>
+template <typename Allocator = StdAllocator<uint8_t>>
 struct Frame {
   /**
    * Allocation ceiling this Frame's buffers are sized to, in luma
@@ -87,9 +88,9 @@ struct Frame {
    * header comment above). Prefer y()/u()/v() (or yRow()/uRow()/vRow())
    * over indexing these directly.
    */
-  std::vector<uint8_t, Allocator> dataY;
-  std::vector<uint8_t, Allocator> dataU;
-  std::vector<uint8_t, Allocator> dataV;
+  Buffer<uint8_t, Allocator> dataY;
+  Buffer<uint8_t, Allocator> dataU;
+  Buffer<uint8_t, Allocator> dataV;
 
   int width = 0;   ///< coded (MB-aligned) luma width in samples
   int height = 0;  ///< coded (MB-aligned) luma height in samples
@@ -105,46 +106,54 @@ struct Frame {
    * maxHeight-derived, see setMaxDimension()) sizes if not already done.
    * Safe to call more than once (e.g. once per setSize()); a no-op after
    * the first call, so it never re-allocates in the per-frame decode hot
-   * path.
+   * path. Returns false - without crashing - if the allocator (see
+   * StdAllocator.h) couldn't satisfy one of the three allocations; on
+   * failure, any of the three that *did* succeed are released again
+   * first, so a Frame never sits around half-allocated and a later retry
+   * attempts all three fresh.
    */
-  void ensureAllocated() {
-    if (!dataY.empty()) return;
-    dataY.resize((size_t)maxWidth * maxHeight);
-    dataU.resize((size_t)(maxWidth / 2) * (maxHeight / 2));
-    dataV.resize((size_t)(maxWidth / 2) * (maxHeight / 2));
+  bool ensureAllocated() {
+    if (!dataY.empty()) return true;
+    bool ok = dataY.allocate((size_t)maxWidth * maxHeight) &&
+              dataU.allocate((size_t)(maxWidth / 2) * (maxHeight / 2)) &&
+              dataV.allocate((size_t)(maxWidth / 2) * (maxHeight / 2));
+    if (!ok) {
+      release();
+      return false;
+    }
+    return true;
   }
 
   /**
    * Sets this picture's actual coded dimensions (from the active SPS) and
    * derives the plane strides. Must be called before any row accessor or
    * copyFrom(); allocates backing storage on first use via
-   * ensureAllocated().
+   * ensureAllocated(), whose success/failure this returns - the
+   * dimensions/strides below are left unset on failure, matching a Frame
+   * that was never sized at all.
    */
-  void setSize(int w, int h) {
-    ensureAllocated();
+  bool setSize(int w, int h) {
+    if (!ensureAllocated()) return false;
     width = w;
     height = h;
     strideY = w;
     strideC = w / 2;
+    return true;
   }
 
   /**
-   * Releases the three backing buffers back to the allocator (clear() +
-   * shrink_to_fit() each) and resets dimensions to zero - the
-   * counterpart to ensureAllocated()/setSize(), for callers that want to
-   * reclaim this picture's ~38KB+ (maxWidth x maxHeight-sized) buffers
-   * when done decoding/encoding instead of leaving them resident for the
-   * rest of the program's lifetime. setSize() (via
-   * ensureAllocated()) reallocates on the next use, same as before this
-   * Frame's first setSize() call.
+   * Releases the three backing buffers back to the allocator and resets
+   * dimensions to zero - the counterpart to ensureAllocated()/setSize(),
+   * for callers that want to reclaim this picture's ~38KB+ (maxWidth x
+   * maxHeight-sized) buffers when done decoding/encoding instead of
+   * leaving them resident for the rest of the program's lifetime.
+   * setSize() (via ensureAllocated()) reallocates on the next use, same
+   * as before this Frame's first setSize() call.
    */
   void release() {
-    dataY.clear();
-    dataY.shrink_to_fit();
-    dataU.clear();
-    dataU.shrink_to_fit();
-    dataV.clear();
-    dataV.shrink_to_fit();
+    dataY.release();
+    dataU.release();
+    dataV.release();
     width = height = strideY = strideC = 0;
   }
 
@@ -180,10 +189,13 @@ struct Frame {
    * slot (Decoder::refFrames_) once it has been fully reconstructed and
    * deblocked, so subsequent P-slice motion compensation reads a stable
    * copy even while the next picture starts overwriting the "current"
-   * buffer.
+   * buffer. Returns false, without copying anything, if this Frame's own
+   * ensureAllocated() failed (out of memory) - dimensions/frameNum/
+   * isReference are left unset in that case, matching a Frame that was
+   * never sized.
    */
-  void copyFrom(const Frame& other) {
-    ensureAllocated();
+  bool copyFrom(const Frame& other) {
+    if (!ensureAllocated()) return false;
     width = other.width;
     height = other.height;
     strideY = other.strideY;
@@ -193,6 +205,7 @@ struct Frame {
     memcpy(y(), other.y(), (size_t)strideY * height);
     memcpy(u(), other.u(), (size_t)strideC * (height / 2));
     memcpy(v(), other.v(), (size_t)strideC * (height / 2));
+    return true;
   }
 };
 

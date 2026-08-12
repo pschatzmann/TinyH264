@@ -62,7 +62,7 @@ struct MbDecodeContext {
    */
   const Frame<Allocator>* refList[H264_MAX_REF_FRAMES] = {nullptr};
   int numActiveRefs = 0;
-  MbInfoTable* mbInfo;
+  MbInfoTable<Allocator>* mbInfo;
   const Sps* sps;
   const Pps* pps;
   int sliceId;

@@ -1,6 +1,8 @@
 #pragma once
 #include <stdint.h>
-#include <vector>
+#include <memory>
+#include "../StdAllocator.h"
+#include "h264_buffer.h"
 #include "h264_config.h"
 #include "h264_tables.h"
 
@@ -105,7 +107,22 @@ struct MacroblockInfo {
  * ESP32's DRAM .bss segment before the sketch even runs - confirmed by
  * an actual arduino-cli link failure, not just budget math, the same
  * way the original Frame overflow was found.
+ *
+ * Templated on Allocator (default StdAllocator<uint8_t>, see
+ * ../StdAllocator.h), propagated from Decoder<Allocator>/
+ * Encoder<Allocator> exactly like Frame<Allocator> - so a PSRAM
+ * allocator (PSRAMAllocatorESP32<uint8_t>) moves this table's ~38.7KB
+ * (at the QVGA default - see docs/memory-budget.md) off internal SRAM
+ * along with the picture buffers, instead of always competing with the
+ * rest of the sketch for it. sliceId_/mb_ need `int16_t`/`MacroblockInfo`
+ * allocators respectively, not `Allocator` itself (which is conventionally
+ * an allocator of `uint8_t`, matching Frame's own Y/U/V planes) -
+ * std::allocator_traits<Allocator>::rebind_alloc<T> derives those,
+ * the same rebinding mechanism std::vector uses internally (and the
+ * reason StdAllocator/PSRAMAllocatorESP32 both provide the rebinding
+ * constructor their own file comments describe).
  */
+template <typename Allocator = StdAllocator<uint8_t>>
 class MbInfoTable {
  public:
   /**
@@ -121,10 +138,8 @@ class MbInfoTable {
   void setMaxDimension(int maxWidth, int maxHeight) {
     maxMbs_ = ((maxWidth + 15) / 16) * ((maxHeight + 15) / 16);
     if (!sliceId_.empty()) {
-      sliceId_.clear();
-      sliceId_.shrink_to_fit();
-      mb_.clear();
-      mb_.shrink_to_fit();
+      sliceId_.release();
+      mb_.release();
     }
   }
 
@@ -134,20 +149,30 @@ class MbInfoTable {
    * `mbWidth` x `mbHeight` macroblocks. Allocates the backing storage
    * (at maxMbs_ capacity) on the first call; a no-op allocation-wise on
    * subsequent calls, so this doesn't reintroduce per-picture heap
-   * allocation into the decode/encode hot path.
+   * allocation into the decode/encode hot path. Returns false - without
+   * crashing - if that allocation failed (out of memory - see
+   * ../StdAllocator.h); the table is left exactly as it was before this
+   * call in that case (mbWidth()/mbHeight() unchanged), so a caller that
+   * ignores the return value doesn't silently index into a table sized
+   * for the wrong picture.
    */
-  void reset(int mbWidth, int mbHeight) {
+  bool reset(int mbWidth, int mbHeight) {
+    if (sliceId_.empty()) {
+      bool ok = sliceId_.allocate(maxMbs_) && mb_.allocate(maxMbs_);
+      if (!ok) {
+        sliceId_.release();
+        mb_.release();
+        return false;
+      }
+    }
     mbWidth_ = mbWidth;
     mbHeight_ = mbHeight;
-    if (sliceId_.empty()) {
-      sliceId_.resize(maxMbs_);
-      mb_.resize(maxMbs_);
-    }
     int n = mbWidth * mbHeight;
     for (int i = 0; i < n; i++) {
       sliceId_[i] = -1;
       mb_[i] = MacroblockInfo();
     }
+    return true;
   }
 
   int mbWidth() const { return mbWidth_; }   ///< picture width in macroblocks
@@ -229,10 +254,13 @@ class MbInfoTable {
   }
 
  private:
+  using SliceIdAllocator = typename std::allocator_traits<Allocator>::template rebind_alloc<int16_t>;
+  using MbAllocator = typename std::allocator_traits<Allocator>::template rebind_alloc<MacroblockInfo>;
+
   int mbWidth_ = 0, mbHeight_ = 0;
   int maxMbs_ = H264_MAX_MBS;
-  std::vector<int16_t> sliceId_;
-  std::vector<MacroblockInfo> mb_;
+  Buffer<int16_t, SliceIdAllocator> sliceId_;
+  Buffer<MacroblockInfo, MbAllocator> mb_;
 };
 
 /**

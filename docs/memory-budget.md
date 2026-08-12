@@ -76,11 +76,34 @@ happens: `begin()` reserves the picture buffers (and, on the encoder
 side, optionally the RGB/YUV422 conversion scratch too - pass
 `begin(true)`) up front instead of waiting for the first call, so an
 allocation failure surfaces deterministically in `setup()` rather than
-mid-stream; `end()` releases everything back to the heap and resets the
-object to a fresh state, for reclaiming that memory before doing
-something else memory-hungry without destructing and reconstructing the
-whole object. Neither is required - the lazy default and the
+mid-stream - as a `false` return (`begin()` on either class now returns
+`bool`) and `Status::kAllocationError`/a `0` `encodeFrame()` return
+thereafter, not a crash - see the note below and `StdAllocator.h`'s file
+comment for the mechanics. `end()` releases everything back to the heap
+and resets the object to a fresh state, for reclaiming that memory before
+doing something else memory-hungry without destructing and reconstructing
+the whole object. Neither is required - the lazy default and the
 destructor's own cleanup are enough for most sketches.
+
+**Allocation failure doesn't crash.** Every heap allocation in this
+library - the picture buffers (`Frame<Allocator>`'s Y/U/V planes),
+`MbInfoTable`'s per-macroblock metadata, and the encoder's RGB/YUV422
+scratch buffers alike, `begin()`'s eager path and the lazy first-use path
+alike - goes through `StdAllocator<uint8_t>` (the default `Allocator`,
+see `src/StdAllocator.h`) or `PSRAMAllocatorESP32`, both of which return
+`nullptr` on failure instead of throwing `std::bad_alloc`; that matters
+because many embedded C++ toolchains build with exceptions disabled
+entirely, where a thrown exception would call `std::terminate()`
+regardless of any `try`/`catch`. None of these go through `std::vector`
+either, for the same reason - see `src/common/h264_buffer.h`'s file
+comment for why a null-returning allocator and `std::vector` don't mix
+safely. `TinyH264Decoder::write()`/`decodeNext()` report
+`Status::kAllocationError` (`hasError()` returns `true` for it, the same
+as `kError`/`kUnsupported`); `TinyH264Encoder::encodeFrame()` (and its
+color-format overloads) return `0`, the same convention already used for
+a too-small `dst` buffer or invalid width/height/qp. This is what "the
+QVGA-crash story" referenced below (and in the Estimated-max-resolution
+section) would report today instead of taking the whole sketch down.
 
 See `src/h264_config.h` to change the compile-time
 `H264_MAX_REF_FRAMES`/`H264_MAX_WIDTH`/`H264_MAX_HEIGHT` upper bounds
@@ -88,11 +111,17 @@ See `src/h264_config.h` to change the compile-time
 even tighter plain-ESP32 budget, or to raise it further if targeting a
 board with PSRAM (e.g. ESP32-S3) - see the `PSRAMAllocatorESP32` example
 in [Decoding](decoding.md#accessing-pixel-data), which works identically
-for `TinyH264Encoder<PSRAMAllocatorESP32<uint8_t>>`. PSRAM only moves the
-*picture buffers* off the regular heap (via the `Allocator` template
-parameter) - the metadata table and scratch buffers described above stay
-on regular heap either way, since they're small enough (tens of KB, not
-hundreds) not to need it.
+for `TinyH264Encoder<PSRAMAllocatorESP32<uint8_t>>`. PSRAM moves *every*
+heap allocation this library makes off the regular heap, via the
+`Allocator` template parameter: the picture buffers, `MbInfoTable`'s
+per-macroblock metadata (~0.516 bytes/pixel, ~38.7KB at QVGA - by far the
+largest of the "static-looking" costs above once resolution grows), and
+the encoder's RGB/YUV422 scratch buffers all follow whichever `Allocator`
+the `Decoder<Allocator>`/`Encoder<Allocator>` was instantiated with.
+Only the NAL/slice scratch buffer (`H264_MAX_NAL_SIZE`, a fixed-size
+array, not a heap allocation at all) and the SPS/PPS tables stay on
+internal SRAM regardless - see the Estimated-max-resolution section
+below for what that leaves as the real ceiling on a PSRAM board.
 
 ## Estimated max resolution by board
 
@@ -109,14 +138,14 @@ other libraries, and normal runtime overhead are accounted for.
 | Board | Total SRAM | Available heap | Max resolution | Confidence |
 |---|---|---|---|---|
 | ESP32 (no PSRAM) | ~520KB | ~284KB | **256x192** | Measured on real hardware (this project's `DecodeToDisplay` example) |
-| ESP32 with PSRAM† | ~520KB + 2-8MB PSRAM | ~284KB internal | **640x480** (VGA) | Speculative - never built/tested past QVGA in this project |
+| ESP32 with PSRAM† | ~520KB + 2-8MB PSRAM | ~284KB internal | **≥640x480** (VGA) | Stale lower bound, not a re-verified ceiling - see note † |
 | ESP32-S3 (no PSRAM) | ~512KB | ~272KB | **256x192** | Estimated - `arduino-cli` static-RAM report only, not measured free-heap |
-| ESP32-S3 with PSRAM† | ~512KB + 2-8MB PSRAM | ~272KB internal | **640x480** (VGA) | Speculative - never built/tested past QVGA in this project |
+| ESP32-S3 with PSRAM† | ~512KB + 2-8MB PSRAM | ~272KB internal | **≥640x480** (VGA) | Stale lower bound, not a re-verified ceiling - see note † |
 | RP2040 | 264KB | ~219KB | **240x160** (HQVGA) | Estimated - `arduino-cli` report only, no RP2040 hardware tested |
 | RP2350 (Pico 2) | 520KB | ~480KB | **320x240** (QVGA) | Estimated - `arduino-cli` report only, no RP2350 hardware tested |
 | STM32H750VBT6 (WeAct) | 1MB* | ~488KB | **320x240** (QVGA) | Estimated - `arduino-cli` report only, no STM32 hardware tested |
 
-† `PSRAMAllocatorESP32<uint8_t>` (see [Decoding](decoding.md#accessing-pixel-data)) only moves the *picture buffers* to PSRAM via the `Allocator` template parameter - `MbInfoTable` (the per-macroblock metadata table) is **not** templated on `Allocator` and always lives on regular internal SRAM, no matter which allocator the decoder uses. So PSRAM doesn't make resolution unconstrained: picture buffers stop being the limiting factor (PSRAM capacity, typically 2-8MB, is vastly more than 2-4 buffers need at any sane resolution), but the metadata table (~0.516 bytes/pixel) and the NAL scratch buffer (`H264_MAX_NAL_SIZE`, 32KB by default) still compete for the same ~270-284KB of internal SRAM as everything else. VGA (640x480) is where that internal-SRAM-only constraint lands with a comparable ~42-44% margin to the rest of this table - but unlike every other row, this project has never actually compiled or run anything past QVGA, so treat this figure as a rough extrapolation, not a validated recommendation. Two things not accounted for in this estimate, worth checking before relying on it: (1) `H264_MAX_NAL_SIZE`'s default (32KB) was sized for QCIF-scale slice data - a 640x480 picture has ~12x QCIF's macroblock count, and may need this raised (a `#define`, itself a static-RAM cost, cutting further into the same internal-SRAM budget - see `h264_config.h`); (2) real PSRAM capacity varies a lot by module (2MB on some boards, 8MB on others) - confirm yours is enough for however many reference frames you configure via `setMaxRefFrames()` before assuming it's a non-issue. RP2040/RP2350/STM32H750 don't get a "with PSRAM" row here because this project doesn't currently implement a PSRAM allocator for those cores - only `PSRAMAllocatorESP32.h` exists today.
+† `PSRAMAllocatorESP32<uint8_t>` (see [Decoding](decoding.md#accessing-pixel-data)) moves every heap allocation this library makes to PSRAM via the `Allocator` template parameter - as of this table's last update, that includes `MbInfoTable` (the per-macroblock metadata table), not just the picture buffers: an earlier version of this library kept `MbInfoTable` hardcoded to internal SRAM regardless of `Allocator` (the same limitation this footnote used to describe); it's now templated on `Allocator` the same way `Frame` is, via `std::allocator_traits`'s rebind mechanism (`sliceId_`/`mb_` need `int16_t`/`MacroblockInfo` allocators, not `uint8_t` - see `src/common/h264_mb_info.h`'s file comment for the mechanics, and `test/native/test_alloc_failure.cpp` for it verified working through the public API, not just compiling). That removes the resolution-scaling internal-SRAM cost (~0.516 bytes/pixel) the VGA figure below was originally derived from, so the real ceiling on a PSRAM board is now dominated by PSRAM capacity itself (typically 2-8MB, vastly more than 2-4 picture buffers plus one metadata table need at any sane resolution) and the small, fixed (not resolution-scaling) internal-SRAM cost of `H264_MAX_NAL_SIZE` (32KB by default) plus the SPS/PPS tables - nothing left on internal SRAM that grows with resolution at all. **The 640x480 (VGA) figure in this table predates that change and is now a stale lower bound, not a re-verified ceiling** - the real number is very likely considerably higher, but this project hasn't measured it and won't publish a guessed replacement (see this file's own opening note: every figure here is either a real `arduino-cli`/hardware measurement or clearly labeled speculative/estimated) - treat VGA as "confirmed to still fit," not "the limit," until someone actually measures higher. RP2040/RP2350/STM32H750 don't get a "with PSRAM" row here because this project doesn't currently implement a PSRAM allocator for those cores - only `PSRAMAllocatorESP32.h` exists today.
 
 \* STM32H750's 1MB SRAM is split across several regions (DTCM, AXI SRAM,
 SRAM1-4); the Arduino core's linker script addresses ~512KB of it as one
