@@ -59,10 +59,7 @@ on-device timing instrumentation for the methodology.
 **Encoding**: QCIF (176x144), `examples/EncodeSyntheticFrame`'s built-in
 benchmark (30 repetitions of an 8-frame synthetic-gradient GOP,
 `micros()`-timed per frame, same methodology as the decode table above).
-Encoding is far more expensive than decoding - see
-[Optimizations](docs/optimizations.md#encoding)
-for why (an exhaustive motion search) and what's been done/considered
-about it.
+Encoding is far more expensive than decoding - The timings below are w/o any optimizations.
 
 | Board | avg | min | max |
 |---|---|---|---|
@@ -89,39 +86,14 @@ rate control target, keyframe interval, and synthetic-gradient GOP
 table's x86 row - not a fair apples-to-apples comparison with the
 boards above it.
 
-**Motion search range, real hardware**: the table above uses the
-default `setMotionSearchRange()` value (8). Lowering it trades
-compression efficiency for speed - confirmed on ESP32-S3
-(`range 8 -> 4`): avg 486647 -> 241217 us (2.02x faster), min (I-frame,
-never touches motion search) 205299 -> 200952 us (~2%, noise, as
-expected), max (P-frame) 584823 -> 256509 us (2.28x faster). See
-[Optimizations](docs/optimizations.md#encoding)
-for the full profiling behind those numbers (motion search turns out to
-be ~60-65% of P-frame time on ESP32-S3, not effectively all of it) and
-`setMotionSearchRange()`'s usage in [Encoding](docs/encoding.md).
+These numbers are all too low for streaming live video. Therefore different __optimizations__ have been set in place which will turn fast microcontrollers into a viable option. For slow microcontrollers the functionality is still useful for some special scenaios like Time-Lapse Recording, AI Vision Agents and Streaming Analysis, Low-Storage CCTV & Dashcams, Remote Wildlife Traps ...
 
-**Motion search algorithm, real hardware**: `setMotionSearchAlgorithm()`
-switches the search itself, independent of range - confirmed on ESP32-S3
-at the default range=8 (`Exhaustive` -> `Fast`, a Diamond Search): avg
-486647 -> 177094 us (**2.75x faster**), max (P-frame) 584823 -> 206981 us
-(**2.83x faster**). Unlike the range setting, this is a real,
-data-dependent quality/compression tradeoff, not just a speed dial.
-Combining both (`range=4` + `Fast`) measured avg 172003 us, max 206974
-us - essentially the same as `Fast` alone at the default range=8, since
-`range` mostly just bounds `Fast`'s worst case rather than shaping its
-typical-case cost the way it does for `Exhaustive`; see
-[Optimizations](docs/optimizations.md#encoding) for why, and
-`setMotionSearchAlgorithm()`'s usage in [Encoding](docs/encoding.md).
 
-**`setAllOptimizationsActive(true)`, real hardware**: confirmed on
+**`setAllOptimizationsActive(true)`,  real hardware**: confirmed on
 STM32H750VBT6 (`-O3`), combining `Fast` with this session's other encoder
 work (a duplicate motion-compensation/transform pass eliminated - see
-[Optimizations](docs/optimizations.md#encoding)): avg 88616 -> 21461 us
-(**4.13x faster**), min (I-frame, unaffected) 15744 -> 15528 us (~1%,
-noise), max (P-frame) 114245 -> 24322 us (**4.70x faster**). The old
-baseline predates both optimizations, so this can't cleanly attribute the
-win to just one of them - it's the real, combined, on-device result of
-calling the one convenience setter.
+[Optimizations](docs/optimizations.md#encoding)): avg 88616 -> 21461 us (= 46.6 fps)
+(**4.13x faster**).
 
 
 ## Containers
