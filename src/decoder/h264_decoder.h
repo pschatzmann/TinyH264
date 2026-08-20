@@ -179,6 +179,15 @@ class Decoder {
   const Frame<Allocator>& frame() const { return curFrame_; }
 
   /**
+   * The SPS in effect for the most recently decoded picture's slices
+   * (valid after next() returns DecodeStatus::kOk) - e.g. for its
+   * declared frame rate, Sps::frameRate(). Default-constructed
+   * (Sps::valid == false, frameRate() == 0.0) before any slice has been
+   * decoded.
+   */
+  const Sps& sps() const { return currentSps_; }
+
+  /**
    * Reserves this decoder's picture buffers (curFrame_ plus all
    * H264_MAX_REF_FRAMES reference slots, each up to their maxWidth()/
    * maxHeight() maximum - see setMaxDimension()/h264_frame.h) up
@@ -227,6 +236,7 @@ class Decoder {
     inputExhausted_ = false;
     refFrameCount_ = 0;
     sliceCount_ = 0;
+    currentSps_ = Sps();
   }
 
  private:
@@ -257,6 +267,7 @@ class Decoder {
     if (!pps.valid || pps.id != ppsId) return DecodeStatus::kError;
     const Sps& sps = spsTable_[pps.spsId % H264_MAX_SPS];
     if (!sps.valid || sps.id != pps.spsId) return DecodeStatus::kError;
+    currentSps_ = sps;  // see sps(), e.g. TinyH264Decoder::fps()
 
     /*
      * Re-parse from the start now that sps/pps are known (parseSliceHeader
@@ -417,6 +428,7 @@ class Decoder {
   NalReader nalReader_;                   ///< Annex-B demuxer over the buffer given to setInput()
 
   Sps spsTable_[H264_MAX_SPS];  ///< cached SPS entries, indexed by id % H264_MAX_SPS
+  Sps currentSps_;  ///< SPS used by the most recently decoded slice - see sps()
   Pps ppsTable_[H264_MAX_PPS];  ///< cached PPS entries, indexed by id % H264_MAX_PPS
   bool haveSps_ = false, havePps_ = false; ///< true once at least one SPS/PPS has been parsed
   bool inputExhausted_ = false; ///< mirrors inputExhausted()

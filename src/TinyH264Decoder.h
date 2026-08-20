@@ -143,9 +143,10 @@ class TinyH264Decoder {
    * still alive. Safe to call begin()/write() again afterward to start
    * over.
    */
-  void end() { 
-    decoder_.end(); 
-    lastStatus_ = Status::kNeedMoreData;}
+  void end() {
+    decoder_.end();
+    lastStatus_ = Status::kNeedMoreData;
+  }
 
   /**
    * Feeds one buffer of Annex-B data (NAL units delimited by 00 00 01 / 00
@@ -202,6 +203,20 @@ class TinyH264Decoder {
     return lastStatus_ == Status::kError || lastStatus_ == Status::kUnsupported ||
            lastStatus_ == Status::kAllocationError;
   }
+
+  /**
+   * The frame rate declared by the stream itself - SPS vui_parameters()'s
+   * timing_info (num_units_in_tick/time_scale), i.e. what the encoder
+   * says the source video's frame rate is, not anything timed/measured
+   * by this decoder. Valid once at least one picture has been decoded
+   * (uses the SPS active for the most recently decoded picture's
+   * slices); returns 0.0f if that SPS never set vui_parameters_present_flag/
+   * timing_info_present_flag - a common, spec-legal case (many encoders,
+   * including this library's own TinyH264Encoder, never emit VUI at all),
+   * not an error. See Sps::frameRate() (decoder/h264_sps_pps.h) for the
+   * exact conversion.
+   */
+  float fps() const { return (float)decoder_.sps().frameRate(); }
 
   /*
    * Valid after the frame callback fires (or decodeNext() returns

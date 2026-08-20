@@ -52,6 +52,17 @@ struct Sps {
   bool frameCroppingFlag = false;
   uint32_t cropLeft = 0, cropRight = 0, cropTop = 0, cropBottom = 0;
 
+  /*
+   * vui_parameters()'s timing_info (clause E.1.1, E.2.1) - the encoder's
+   * *declared* source frame rate, not anything measured by this decoder.
+   * Optional: many encoders (including this library's own
+   * TinyH264Encoder) never emit vui_parameters() at all, in which case
+   * timingInfoPresentFlag stays false and frameRate() below returns 0.
+   */
+  bool timingInfoPresentFlag = false;
+  uint32_t numUnitsInTick = 0;
+  uint32_t timeScale = 0;
+
   // Derived (filled in by finalize(), called at the end of parseSps()):
   uint32_t picWidthInMbs = 0;
   uint32_t picHeightInMbs = 0;
@@ -87,6 +98,23 @@ struct Sps {
       displayWidth = (cw < codedWidth) ? codedWidth - cw : 0;
       displayHeight = (ch < codedHeight) ? codedHeight - ch : 0;
     }
+  }
+
+  /**
+   * The encoder-declared frame rate from vui_parameters()'s timing_info,
+   * in frames/second - clause E.2.1's num_units_in_tick/time_scale, per
+   * the standard `time_scale / (2 * num_units_in_tick)` relationship
+   * (the factor of 2 is the spec's clock-tick convention, which counts
+   * ticks per *field* even for progressive streams - cross-checked
+   * against FFmpeg's own SPS-to-framerate conversion in h264_slice.c).
+   * Returns 0.0 if the stream's SPS never set timingInfoPresentFlag - a
+   * common, spec-legal case, not an error (see timingInfoPresentFlag's
+   * own comment above).
+   */
+  double frameRate() const {
+    return (timingInfoPresentFlag && numUnitsInTick != 0)
+               ? (double)timeScale / (2.0 * (double)numUnitsInTick)
+               : 0.0;
   }
 };
 
@@ -133,6 +161,57 @@ inline bool spsHasChromaExtension(uint8_t profileIdc) {
       return true;
     default:
       return false;
+  }
+}
+
+/**
+ * Parses the leading part of vui_parameters() (clause E.1.1) just far
+ * enough to reach timing_info - aspect_ratio_info, overscan_info,
+ * video_signal_type, and chroma_loc_info all precede it in the syntax
+ * and must be walked (not skipped) to stay byte/bit-aligned, even though
+ * none of their *values* are used here. Stops right after timing_info;
+ * nal_hrd_parameters()/vcl_hrd_parameters()/pic_struct_present_flag/
+ * bitstream_restriction (everything else in vui_parameters()) are never
+ * read, since nothing after timing_info is needed and nothing meaningful
+ * follows vui_parameters() in the RBSP anyway. Field order cross-checked
+ * against FFmpeg's ff_h2645_decode_common_vui_params()/
+ * decode_vui_parameters() (h2645_vui.c/h264_ps.c).
+ */
+inline void parseVuiTimingInfo(BitReader& br, Sps* sps) {
+  if (br.flag()) {  // aspect_ratio_info_present_flag
+    uint32_t aspectRatioIdc = br.u(8);
+    if (aspectRatioIdc == 255) {  // Extended_SAR
+      br.u(16);  // sar_width
+      br.u(16);  // sar_height
+    }
+  }
+  if (br.flag()) {  // overscan_info_present_flag
+    br.flag();       // overscan_appropriate_flag
+  }
+  if (br.flag()) {  // video_signal_type_present_flag
+    br.u(3);          // video_format
+    br.flag();        // video_full_range_flag
+    if (br.flag()) {  // colour_description_present_flag
+      br.u(8);  // colour_primaries
+      br.u(8);  // transfer_characteristics
+      br.u(8);  // matrix_coefficients
+    }
+  }
+  if (br.flag()) {  // chroma_loc_info_present_flag
+    br.ue();          // chroma_sample_loc_type_top_field
+    br.ue();          // chroma_sample_loc_type_bottom_field
+  }
+
+  sps->timingInfoPresentFlag = br.flag();
+  if (sps->timingInfoPresentFlag) {
+    sps->numUnitsInTick = br.u(32);
+    sps->timeScale = br.u(32);
+    br.flag();  // fixed_frame_rate_flag - not currently exposed
+    if (sps->numUnitsInTick == 0 || sps->timeScale == 0) {
+      // Spec-illegal (would divide by zero); treat as "not present" per
+      // the same tolerance FFmpeg's own decoder applies.
+      sps->timingInfoPresentFlag = false;
+    }
   }
 }
 
@@ -212,10 +291,9 @@ inline bool parseSps(BitReader& br, Sps* sps) {
     sps->cropTop = br.ue();
     sps->cropBottom = br.ue();
   }
-  /*
-   * vui_parameters_present_flag / vui_parameters(): not needed for decode,
-   * and nothing meaningful follows it in the RBSP, so we stop reading here.
-   */
+  if (br.flag()) {  // vui_parameters_present_flag
+    parseVuiTimingInfo(br, sps);
+  }
 
   if (br.error()) {
     sps->unsupported = true;
