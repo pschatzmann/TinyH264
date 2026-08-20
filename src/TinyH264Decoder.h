@@ -252,6 +252,30 @@ class TinyH264Decoder {
   float scaleFactor() const { return scaleFactor_; }
 
   /**
+   * Controls whether toRGB565() (both whole-frame and windowed/tiled
+   * overloads) byte-swaps each output uint16_t before returning it.
+   * RGB565 is a 16-bit value, but the wire format most SPI/8080-parallel
+   * TFT controllers (ILI9341, ST7789, ...) expect is big-endian (high
+   * byte first) - the opposite of how a uint16_t is laid out in memory
+   * on every MCU this library targets (ESP32, RP2040 - both
+   * little-endian). If a display driver (or your own SPI code) writes
+   * toRGB565()'s buffer to the panel as raw bytes without separately
+   * correcting for this, the R/B channels and brightness come out
+   * scrambled - a very common "colors are wrong" symptom that has
+   * nothing to do with the YUV->RGB conversion itself being wrong.
+   * Defaults to true (swap) since that's what a raw memcpy/DMA straight
+   * to an SPI panel needs; set false if you're instead handing the
+   * buffer to a display library (e.g. TFT_eSPI's pushImage()) that
+   * already does its own byte-order correction - swapping twice would
+   * undo the fix. Does not affect toRGB666()/toRGB888()/toYUV420(),
+   * which are byte-oriented (no multi-byte word, so no endianness to
+   * get wrong).
+   */
+  void setByteSwap(bool enable) { byteSwap_ = enable; }
+  /// The current toRGB565() byte-swap setting - see setByteSwap().
+  bool byteSwap() const { return byteSwap_; }
+
+  /**
    * Scaled picture width/height - what the toXXX() conversion methods'
    * whole-frame overloads actually produce, and what a windowed/tiled
    * toXXX() call's x/y/dx/dy are measured against (see setScaleFactor()).
@@ -298,28 +322,32 @@ class TinyH264Decoder {
 
   /**
    * Converts the most recently decoded picture to RGB565 (16-bit,
-   * 5-6-5 packed, little-endian) into a caller-provided buffer - the
-   * format most embedded display libraries (TFT_eSPI, Adafruit_GFX,
-   * LovyanGFX, ...) expect. Output is widthScaled()*heightScaled() (see
-   * setScaleFactor() - equal to width()*height() at the default scale
-   * factor of 1.0). `dstCapacity` is the buffer's size in uint16_t
-   * entries (not bytes); if it's smaller than widthScaled()*heightScaled(),
-   * nothing is written and this returns 0 - checked explicitly rather
-   * than trusting the caller sized `dst` correctly, since a raw pointer
-   * carries no size information of its own and a mismatch here would
-   * otherwise silently corrupt memory past the buffer. On success,
-   * returns the number of uint16_t entries written. Never allocates on
-   * success; write straight into your display's own framebuffer if it
-   * has one, rather than through an intermediate copy. See
-   * decoder/h264_rgb.h for the exact YUV-to-RGB conversion used (ITU-R
-   * BT.601 limited range, cross-checked against ffmpeg's own conversion
-   * to within 1 LSB per channel). Also see toRGB666()/toRGB888() for
-   * 18-bit and full 24-bit color instead.
+   * 5-6-5 packed) into a caller-provided buffer - the format most
+   * embedded display libraries (TFT_eSPI, Adafruit_GFX, LovyanGFX, ...)
+   * expect. Each uint16_t is byte-swapped before being written unless
+   * setByteSwap(false) was called - see setByteSwap() for why the
+   * default is swap-on (most SPI/parallel TFT panels want big-endian
+   * pixels; every MCU this library targets is little-endian). Output is
+   * widthScaled()*heightScaled() (see setScaleFactor() - equal to
+   * width()*height() at the default scale factor of 1.0). `dstCapacity`
+   * is the buffer's size in uint16_t entries (not bytes); if it's
+   * smaller than widthScaled()*heightScaled(), nothing is written and
+   * this returns 0 - checked explicitly rather than trusting the caller
+   * sized `dst` correctly, since a raw pointer carries no size
+   * information of its own and a mismatch here would otherwise silently
+   * corrupt memory past the buffer. On success, returns the number of
+   * uint16_t entries written. Never allocates on success; write straight
+   * into your display's own framebuffer if it has one, rather than
+   * through an intermediate copy. See decoder/h264_rgb.h for the exact
+   * YUV-to-RGB conversion used (ITU-R BT.601 limited range, cross-checked
+   * against ffmpeg's own conversion to within 1 LSB per channel). Also
+   * see toRGB666()/toRGB888() for 18-bit and full 24-bit color instead.
    */
   size_t toRGB565(uint16_t* dst, size_t dstCapacity) const {
     size_t needed = (size_t)widthScaled() * (size_t)heightScaled();
     if (dstCapacity < needed) return 0;
     convertFrameToRgb565(decoder_.frame(), widthScaled(), heightScaled(), dst);
+    if (byteSwap_) swapBytes16(dst, needed);
     return needed;
   }
 
@@ -347,6 +375,7 @@ class TinyH264Decoder {
     if (dstCapacity < needed) return 0;
     convertFrameToRgb565(decoder_.frame(), widthScaled(), heightScaled(), x, y, dx,
                          dy, dst);
+    if (byteSwap_) swapBytes16(dst, needed);
     return needed;
   }
 
@@ -462,6 +491,20 @@ class TinyH264Decoder {
 
  protected:
   /**
+   * Byte-swaps each of `count` uint16_t entries in place - see
+   * setByteSwap(). A plain 8-bit shuffle rather than a builtin byte-swap
+   * intrinsic, to stay portable across every target this header-only
+   * library compiles on (Xtensa/ARM/desktop) without a per-platform
+   * `#ifdef`.
+   */
+  static void swapBytes16(uint16_t* buf, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+      uint16_t v = buf[i];
+      buf[i] = (uint16_t)((v << 8) | (v >> 8));
+    }
+  }
+
+  /**
    * Maps the internal Decoder's DecodeStatus onto this class's public
    * Status enum (kept separate so the internal enum can evolve without
    * changing the public API's values).
@@ -500,6 +543,7 @@ class TinyH264Decoder {
   void* userData_ = nullptr;
   Status lastStatus_ = Status::kNeedMoreData;
   float scaleFactor_ = 1.0f;
+  bool byteSwap_ = true;
 };
 
 }  // namespace tinyh264

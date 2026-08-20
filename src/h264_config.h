@@ -93,4 +93,4 @@
 /*
  * Activate optimizations
  */
-//#pragma GCC optimize("O3")
+#pragma GCC optimize("O3")
