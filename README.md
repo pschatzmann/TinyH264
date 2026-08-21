@@ -25,6 +25,7 @@ across, the `Serial` output).
 |---|---|---|---|
 | ESP32 | 20494 us (48.8 fps) | 20296 us (49.3 fps) | 20647 us (48.4 fps) |
 | ESP32-S3 | 16045 us (62.3 fps) | 15243 us (65.6 fps) | 16564 us (60.4 fps) |
+| ESP32-P4 | 4720 us (211.9 fps) | 4484 us (223.0 fps) | 5018 us (199.3 fps) |
 | RP2040 | 29008 us (34.5 fps) | 22700 us (44.1 fps) | 32263 us (31.0 fps) |
 | RP2350 | 26193 us (38.2 fps) | 19782 us (50.6 fps) | 29511 us (33.9 fps) |
 | STM32F723 | 13926 us (71.8 fps) | 11377 us (87.9 fps) | 15567 us (64.2 fps) |
@@ -65,6 +66,7 @@ Encoding is far more expensive than decoding - The timings below are w/o any opt
 |---|---|---|---|
 | ESP32 | 600503 us (1.7 fps) | 256325 us (3.9 fps) | 721200 us (1.4 fps) |
 | ESP32-S3 | 486647 us (2.1 fps) | 205299 us (4.9 fps) | 584823 us (1.7 fps) |
+| ESP32-P4 |136026  us (7.4 fps) | 27687 us (36.1 fps) | 174451 us (5.7 fps) |
 | RP2040* | 401440 us (2.5 fps) | 122553 us (8.2 fps) | 499529 us (2.0 fps) |
 | RP2350* | 808982 us (1.2 fps) | 303344 us (3.3 fps) | 983456 us (1.0 fps) |
 | STM32H750VBT6* | 88616 us (11.3 fps) | 15744 us (63.5 fps) | 114245 us (8.8 fps) |
