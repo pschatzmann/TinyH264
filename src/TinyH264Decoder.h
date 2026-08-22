@@ -146,6 +146,8 @@ class TinyH264Decoder {
   void end() {
     decoder_.end();
     lastStatus_ = Status::kNeedMoreData;
+    nextFrameIndex_ = 0;
+    frameIndex_ = 0;
   }
 
   /**
@@ -166,6 +168,7 @@ class TinyH264Decoder {
       DecodeStatus raw = decoder_.next();
       if (raw == DecodeStatus::kOk) {
         lastStatus_ = Status::kFrameReady;
+        onFrameReady();
         if (callback_) callback_(*this, userData_);
         continue;
       }
@@ -194,7 +197,11 @@ class TinyH264Decoder {
    * Does not invoke the frame callback - check the return value (or
    * lastStatus()) for kFrameReady instead.
    */
-  Status decodeNext() { return lastStatus_ = toStatus(decoder_.next()); }
+  Status decodeNext() {
+    lastStatus_ = toStatus(decoder_.next());
+    if (lastStatus_ == Status::kFrameReady) onFrameReady();
+    return lastStatus_;
+  }
 
   /// The Status returned by the most recent write() or decodeNext() call.
   Status lastStatus() const { return lastStatus_; }
@@ -217,6 +224,44 @@ class TinyH264Decoder {
    * exact conversion.
    */
   float fps() const { return (float)decoder_.sps().frameRate(); }
+
+  /**
+   * Sets the frame rate to fall back to when the stream itself doesn't
+   * declare one - i.e. when fps() returns 0.0f (no VUI timing_info, a
+   * common, spec-legal case - see fps()'s own comment; this library's own
+   * TinyH264Encoder never emits VUI). Used by presentationTimeMs() below.
+   * Ignored whenever fps() is nonzero - the stream's own declared rate
+   * always wins. Defaults to 0.0f (no fallback).
+   */
+  void setDefaultFps(float fps) { defaultFps_ = fps; }
+  /// The current fallback frame rate - see setDefaultFps().
+  float defaultFps() const { return defaultFps_; }
+
+  /**
+   * The time, in milliseconds since the first decoded picture, at which
+   * the most recently decoded picture should be displayed - valid after
+   * the frame callback fires (or decodeNext() returns kFrameReady), same
+   * as width()/y()/etc. above.
+   *
+   * This works out to simply `frameIndex * 1000 / fps`: Baseline Profile
+   * (the only profile this decoder supports) has no B-frames, so pictures
+   * are never reordered between decode and display - the Nth picture
+   * decoded is always the Nth picture displayed. That means presentation
+   * time can be derived purely from a running frame count and the frame
+   * rate, without needing any timestamp carried in the bitstream itself
+   * (H.264 slice headers don't carry one anyway - that's what a
+   * container format like MP4/RTP normally supplies).
+   *
+   * The frame rate used is fps() if the stream declared one, otherwise
+   * defaultFps() (see setDefaultFps()) as a fallback. Returns 0 if
+   * neither is known (both are 0.0f) - in that case every frame reports
+   * time 0, since there's no rate to derive an interval from.
+   */
+  uint32_t presentationTimeMs() const {
+    float rate = fps() > 0.0f ? fps() : defaultFps_;
+    if (rate <= 0.0f) return 0;
+    return (uint32_t)((double)frameIndex_ * 1000.0 / (double)rate + 0.5);
+  }
 
   /*
    * Valid after the frame callback fires (or decodeNext() returns
@@ -538,12 +583,22 @@ class TinyH264Decoder {
     return scaled & ~1;
   }
 
+  /**
+   * Records the display-order index of the picture that was just decoded,
+   * for presentationTimeMs() - called once per kFrameReady, from both
+   * write() (before the callback fires) and decodeNext().
+   */
+  void onFrameReady() { frameIndex_ = nextFrameIndex_++; }
+
   Decoder<Allocator> decoder_;
   FrameCallback callback_ = nullptr;
   void* userData_ = nullptr;
   Status lastStatus_ = Status::kNeedMoreData;
   float scaleFactor_ = 1.0f;
   bool byteSwap_ = true;
+  float defaultFps_ = 0.0f;
+  uint32_t frameIndex_ = 0;      ///< display-order index of the most recently decoded picture
+  uint32_t nextFrameIndex_ = 0;  ///< index that will be assigned to the next decoded picture
 };
 
 }  // namespace tinyh264
