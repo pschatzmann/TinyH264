@@ -41,3 +41,10 @@ Intra fallback on a poor motion match (single reference frame, integer-
 pel-only motion search - no P_16x8/P_8x16/P_8x8 sub-partitions, no
 multi-reference) plus simple rate control - see [Encoding](encoding.md)
 for full scope and usage.
+
+On ESP32-P4, `TinyH264Encoder` also has an alternative, dedicated
+hardware H.264 encoder path (`HwEncoderP4`) - a genuinely different
+implementation with its own, narrower feature set (fixed QP only, no
+rate control) - see [Encoding](encoding.md#hardware-encoder-esp32-p4)
+and the [README](../README.md#performance) for scope and measured
+performance.

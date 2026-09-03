@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "../common/Logger.h"
 #include "h264_bitreader.h"
 #include "h264_config.h"
 
@@ -244,6 +245,7 @@ inline bool parseSps(BitReader& br, Sps* sps) {
        * High-profile scaling lists / non-4:2:0 chroma: not something a
        * Baseline-only decoder needs to handle. Flag and stop.
        */
+      H264LOG.warn("parseSps: scaling lists / non-4:2:0 chroma not supported");
       sps->unsupported = true;
       return true;
     }
@@ -259,6 +261,8 @@ inline bool parseSps(BitReader& br, Sps* sps) {
     sps->offsetForTopToBottomField = br.se();
     sps->numRefFramesInPicOrderCntCycle = br.ue();
     if (sps->numRefFramesInPicOrderCntCycle > H264_MAX_POC_CYCLE) {
+      H264LOG.warn("parseSps: numRefFramesInPicOrderCntCycle=%u exceeds H264_MAX_POC_CYCLE=%d",
+                    sps->numRefFramesInPicOrderCntCycle, H264_MAX_POC_CYCLE);
       sps->unsupported = true;
       return true;
     }
@@ -280,6 +284,7 @@ inline bool parseSps(BitReader& br, Sps* sps) {
      * decoder (Baseline requires frame_mbs_only_flag == 1 anyway, but be
      * defensive against non-conformant/mislabeled streams).
      */
+    H264LOG.warn("parseSps: interlaced (PAFF/MBAFF) content not supported");
     sps->unsupported = true;
     return true;
   }
@@ -296,6 +301,7 @@ inline bool parseSps(BitReader& br, Sps* sps) {
   }
 
   if (br.error()) {
+    H264LOG.error("parseSps: bitstream error/truncation");
     sps->unsupported = true;
     return true;
   }
@@ -327,6 +333,8 @@ inline bool parsePps(BitReader& br, Pps* pps) {
      * a feature this decoder's target sources don't use, so we flag it
      * as unsupported rather than mis-decode it.
      */
+    H264LOG.warn("parsePps: FMO (numSliceGroupsMinus1=%u) not supported",
+                  pps->numSliceGroupsMinus1);
     pps->unsupported = true;
     return true;
   }
@@ -347,6 +355,7 @@ inline bool parsePps(BitReader& br, Pps* pps) {
     bool scalingMatrixPresent = br.flag();
     if (scalingMatrixPresent) {
       // High-profile PPS scaling lists: same rationale as SPS above.
+      H264LOG.warn("parsePps: scaling lists not supported");
       pps->unsupported = true;
       return true;
     }
@@ -354,12 +363,14 @@ inline bool parsePps(BitReader& br, Pps* pps) {
   }
 
   if (br.error()) {
+    H264LOG.error("parsePps: bitstream error/truncation");
     pps->unsupported = true;
     return true;
   }
 
   if (pps->entropyCodingModeFlag) {
     // CABAC: this decoder only implements CAVLC.
+    H264LOG.warn("parsePps: CABAC entropy coding not supported (CAVLC only)");
     pps->unsupported = true;
     return true;
   }

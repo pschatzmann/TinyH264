@@ -31,7 +31,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
-#include "../../src/MemoryResource.h"
+#include "../../src/common/MemoryResource.h"
 #include "../../src/decoder/h264_decoder.h"
 #include "../../src/encoder/h264_encoder.h"
 

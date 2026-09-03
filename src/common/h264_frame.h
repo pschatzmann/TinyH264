@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <string.h>
-#include "../MemoryResource.h"
+#include "MemoryResource.h"
 #include "h264_buffer.h"
 #include "h264_config.h"
 

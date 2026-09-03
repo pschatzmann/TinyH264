@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "../common/Logger.h"
 #include "h264_bitreader.h"
 #include "h264_macroblock.h"  // shared helpers: lumaNeighborNnz, decodeLumaBlockFull, etc.
 #include "../common/h264_motion.h"
@@ -182,18 +183,30 @@ inline bool decodeMacroblockInter(BitReader& br, MbDecodeContext& ctx,
 
   if (mbTypeRaw == kPL0_16x16) {
     int8_t r;
-    if (!decodeRefIdx(br, ctx.numActiveRefs, &r)) return false;
+    if (!decodeRefIdx(br, ctx.numActiveRefs, &r)) {
+      H264LOG.error("decodeMacroblockInter: ref_idx_l0 decode failed at mb(%d,%d) (P_L0_16x16)",
+                     ctx.mbX, ctx.mbY);
+      return false;
+    }
     parts[numParts++] = {0, 0, 4, 4, -1, r};
   } else if (mbTypeRaw == kPL0_L0_16x8) {
     int8_t r0, r1;
-    if (!decodeRefIdx(br, ctx.numActiveRefs, &r0)) return false;
-    if (!decodeRefIdx(br, ctx.numActiveRefs, &r1)) return false;
+    if (!decodeRefIdx(br, ctx.numActiveRefs, &r0) ||
+        !decodeRefIdx(br, ctx.numActiveRefs, &r1)) {
+      H264LOG.error("decodeMacroblockInter: ref_idx_l0 decode failed at mb(%d,%d) (P_L0_L0_16x8)",
+                     ctx.mbX, ctx.mbY);
+      return false;
+    }
     parts[numParts++] = {0, 0, 4, 2, 1, r0};
     parts[numParts++] = {0, 2, 4, 2, 0, r1};
   } else if (mbTypeRaw == kPL0_L0_8x16) {
     int8_t r0, r1;
-    if (!decodeRefIdx(br, ctx.numActiveRefs, &r0)) return false;
-    if (!decodeRefIdx(br, ctx.numActiveRefs, &r1)) return false;
+    if (!decodeRefIdx(br, ctx.numActiveRefs, &r0) ||
+        !decodeRefIdx(br, ctx.numActiveRefs, &r1)) {
+      H264LOG.error("decodeMacroblockInter: ref_idx_l0 decode failed at mb(%d,%d) (P_L0_L0_8x16)",
+                     ctx.mbX, ctx.mbY);
+      return false;
+    }
     parts[numParts++] = {0, 0, 2, 4, 0, r0};
     parts[numParts++] = {2, 0, 2, 4, 2, r1};
   } else {
@@ -205,13 +218,19 @@ inline bool decodeMacroblockInter(BitReader& br, MbDecodeContext& ctx,
      */
     uint32_t subType[4];
     for (int i = 0; i < 4; i++) subType[i] = br.ue();
-    if (br.error()) return false;
+    if (br.error()) {
+      H264LOG.error("decodeMacroblockInter: bitstream error reading sub_mb_type at mb(%d,%d)",
+                     ctx.mbX, ctx.mbY);
+      return false;
+    }
 
     int8_t quadRefIdx[4];
     for (int q = 0; q < 4; q++) {
       if (mbTypeRaw == kP8x8ref0) {
         quadRefIdx[q] = 0;
       } else if (!decodeRefIdx(br, ctx.numActiveRefs, &quadRefIdx[q])) {
+        H264LOG.error("decodeMacroblockInter: ref_idx_l0 decode failed at mb(%d,%d) quadrant=%d",
+                       ctx.mbX, ctx.mbY, q);
         return false;
       }
     }
@@ -252,7 +271,11 @@ inline bool decodeMacroblockInter(BitReader& br, MbDecodeContext& ctx,
     int16_t pred[2], mvd[2];
     predictMvGeneral(ctx, parts[i].bx, parts[i].by, parts[i].pw, parts[i].ph,
                       parts[i].refIdx, parts[i].dirSide, pred);
-    if (!decodeMvd(br, mvd)) return false;
+    if (!decodeMvd(br, mvd)) {
+      H264LOG.error("decodeMacroblockInter: mvd_l0 decode failed at mb(%d,%d) part=%d",
+                     ctx.mbX, ctx.mbY, i);
+      return false;
+    }
     int16_t mv[2] = {(int16_t)(pred[0] + mvd[0]), (int16_t)(pred[1] + mvd[1])};
 #ifdef TINYH264_DEBUG_MB
     fprintf(stderr,
@@ -272,7 +295,11 @@ inline bool decodeMacroblockInter(BitReader& br, MbDecodeContext& ctx,
    *     to Inter macroblocks) -------------------------------------------
    */
   uint32_t cbpCode = br.ue();
-  if (cbpCode > 47 || br.error()) return false;
+  if (cbpCode > 47 || br.error()) {
+    H264LOG.error("decodeMacroblockInter: invalid coded_block_pattern %u at mb(%d,%d)",
+                   cbpCode, ctx.mbX, ctx.mbY);
+    return false;
+  }
   uint8_t cbpCombined = kCbpInter[cbpCode];
   mb.cbpLuma = cbpCombined & 0xF;
   mb.cbpChroma = cbpCombined >> 4;
@@ -285,7 +312,11 @@ inline bool decodeMacroblockInter(BitReader& br, MbDecodeContext& ctx,
   qp = ((qp + 52) % 52 + 52) % 52;
   *qpY = qp;
   mb.qpY = (int8_t)qp;
-  if (br.error()) return false;
+  if (br.error()) {
+    H264LOG.error("decodeMacroblockInter: bitstream error reading mb_qp_delta at mb(%d,%d)",
+                   ctx.mbX, ctx.mbY);
+    return false;
+  }
 
   for (int blk = 0; blk < 16; blk++) {
     int quadrant = blk / 4;
@@ -303,7 +334,11 @@ inline bool decodeMacroblockInter(BitReader& br, MbDecodeContext& ctx,
     for (int plane = 0; plane < 2; plane++) {
       int32_t coeff[4];
       uint32_t totalCoeff = 0;
-      if (!residualBlockCavlc(br, -1, 4, coeff, &totalCoeff)) return false;
+      if (!residualBlockCavlc(br, -1, 4, coeff, &totalCoeff)) {
+        H264LOG.error("decodeMacroblockInter: CAVLC chroma DC decode failed at mb(%d,%d) plane=%d",
+                       ctx.mbX, ctx.mbY, plane);
+        return false;
+      }
       int32_t* dst = plane == 0 ? cbDc : crDc;
       dst[0] = coeff[0];
       dst[1] = coeff[1];
@@ -335,7 +370,11 @@ inline bool decodeMacroblockInter(BitReader& br, MbDecodeContext& ctx,
     }
   }
 
-  if (br.error()) return false;
+  if (br.error()) {
+    H264LOG.error("decodeMacroblockInter: bitstream error at end of macroblock at mb(%d,%d)",
+                   ctx.mbX, ctx.mbY);
+    return false;
+  }
   result->ok = true;
   return true;
 }

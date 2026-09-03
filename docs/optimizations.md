@@ -147,6 +147,16 @@ library's real source:
 
 #### ESP32-P4 hardware (H.264 encoder, PPA, ISP)
 
+**Update: the H.264 encoder part of this section is no longer "considered
+and set aside" - it's implemented, working, and ~140x faster than
+software at QCIF.** See the [README](../README.md#performance) for
+measured throughput/PSNR and
+[the investigation writeup](../docs/esp32-p4-hardware-encoder-investigation.md)
+for the root-cause story; `HwEncoderP4` (`src/encoder/h264_hw_encoder_p4.h`)
+is the driver, `TinyH264Encoder::setUseHardware()` the public switch.
+The rest of this entry (datasheet capabilities, PPA/ISP) is kept as
+background context and still-open ground, not superseded.
+
 The only ESP32-family chip with real video hardware (not "ESP32-H3" -
 that chip doesn't exist; the H-series is low-power Thread/Zigbee/Matter
 silicon). Worth a closer look than the other entries here, because it
@@ -199,9 +209,10 @@ via `arduino-cli`), so the toolchain isn't the blocker either.
 
 **PPA** (Pixel-Processing Accelerator): a generic 2D accelerator (scale/
 rotate/mirror/blend/fill) operating on arbitrary memory buffers, not
-just camera/display DMA - closer to something this project could
-actually use than the H.264 block, since it would accelerate *existing*
-glue code rather than requiring a parallel codec. Its formats
+just camera/display DMA - unlike the H.264 block above (now
+implemented, see the update note at the top of this entry), this would
+accelerate *existing* glue code rather than being a parallel codec path
+of its own. Its formats
 (RGB888/RGB565/ARGB8888/YUV420/YUV422/YUV444/GRAY8) line up with
 `encodeFrameRgb888()`/`encodeFrameRgb565()`/`encodeFrameYuv422()` and
 `toRGB565()`/`toRGB888()` (RGB666 is the one gap - not a PPA format at
@@ -216,12 +227,16 @@ project ever sees (`encodeFrame()`'s input is always already-demosaiced
 YUV420/RGB/YUV422). Only relevant to application code feeding a raw
 sensor in, never to code inside this library.
 
-**Net**: parked, not ruled out. No P4 hardware available to validate
-against yet. If picked up: scope as a separate, opt-in P4-only encoder
-path (new class/backend, built from the vendored `hw` driver) rather
-than touching the existing portable `SoftwareEncoder` - PPA would be
-the more natural first piece to adopt, since it accelerates existing
-code rather than replacing it.
+**Net**: H.264 hardware encoding is done (see the update note above).
+PPA remains parked, not ruled out - real P4 hardware is now available
+and routinely used in this project's own development (see the
+[investigation writeup](../docs/esp32-p4-hardware-encoder-investigation.md)),
+so unlike when this entry was first written, validating a PPA
+integration is no longer blocked on hardware access, just unscheduled.
+If picked up: it would accelerate the RGB/YUV422 color-conversion glue
+(`encoder/h264_color_convert.h`, `decoder/h264_rgb.h`) and
+`setScaleFactor()`, not the codec path itself - `HwEncoderP4` already
+covers H.264 encoding on this chip.
 
 ### Other known gaps
 

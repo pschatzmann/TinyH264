@@ -29,6 +29,7 @@ set(TINYH264_TESTS
     test_encode_ratecontrol
     test_encode_setters
     test_lifecycle
+    test_logger_wiring
     test_max_dimension
     test_motion_search_fast
     test_motion_search_range

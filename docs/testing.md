@@ -4,7 +4,7 @@ Correctness is validated by decoding real streams generated with
 `ffmpeg`/libx264 and diffing every pixel against `ffmpeg`'s own decode -
 not by conformance-suite guesswork.
 
-Build and run the whole suite (31 tests) with CMake + CTest from the repo
+Build and run the whole suite (32 tests) with CMake + CTest from the repo
 root:
 
 ```sh
@@ -58,7 +58,10 @@ behaviors (`test_alloc_failure.cpp`: a mock `Allocator` that fails
 `allocate()` on demand, checking that both `TinyH264Decoder` and
 `TinyH264Encoder` report the failure cleanly - `Status::kAllocationError`/
 a `0` return - rather than crashing; see `src/StdAllocator.h`'s file
-comment). Test assets
+comment; `test_logger_wiring.cpp`: confirms the `H264LOG` wiring described
+in [Logging](logging.md) actually compiles and runs with logging enabled,
+not just dormant at its default silent level - not a correctness oracle
+like the rest of this suite). Test assets
 (`assets/*.264`, `assets/*.yuv`) are pre-generated with `ffmpeg`/libx264
 using the same parameters documented in
 [Preparing input with ffmpeg](preparing-input-with-ffmpeg.md) above (the

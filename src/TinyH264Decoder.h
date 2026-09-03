@@ -1,5 +1,5 @@
 #pragma once
-#include "MemoryResource.h"
+#include "common/MemoryResource.h"
 #include "StdAllocator.h"
 #include "decoder/h264_decoder.h"
 #include "decoder/h264_rgb.h"
@@ -398,7 +398,10 @@ class TinyH264Decoder {
    */
   size_t toRGB565(uint16_t* dst, size_t dstCapacity) const {
     size_t needed = (size_t)widthScaled() * (size_t)heightScaled();
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toRGB565: dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToRgb565(decoder_.frame(), widthScaled(), heightScaled(), dst);
     if (byteSwap_) swapBytes16(dst, needed);
     return needed;
@@ -425,7 +428,10 @@ class TinyH264Decoder {
   size_t toRGB565(int x, int y, int dx, int dy, uint16_t* dst,
                   size_t dstCapacity) const {
     size_t needed = (size_t)dx * (size_t)dy;
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toRGB565(windowed): dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToRgb565(decoder_.frame(), widthScaled(), heightScaled(), x, y, dx,
                          dy, dst);
     if (byteSwap_) swapBytes16(dst, needed);
@@ -446,7 +452,10 @@ class TinyH264Decoder {
    */
   size_t toRGB666(uint8_t* dst, size_t dstCapacity) const {
     size_t needed = (size_t)widthScaled() * (size_t)heightScaled() * 3;
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toRGB666: dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToRgb666(decoder_.frame(), widthScaled(), heightScaled(), dst);
     return needed;
   }
@@ -460,7 +469,10 @@ class TinyH264Decoder {
   size_t toRGB666(int x, int y, int dx, int dy, uint8_t* dst,
                   size_t dstCapacity) const {
     size_t needed = (size_t)dx * (size_t)dy * 3;
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toRGB666(windowed): dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToRgb666(decoder_.frame(), widthScaled(), heightScaled(), x, y, dx,
                          dy, dst);
     return needed;
@@ -477,7 +489,10 @@ class TinyH264Decoder {
    */
   size_t toRGB888(uint8_t* dst, size_t dstCapacity) const {
     size_t needed = (size_t)widthScaled() * (size_t)heightScaled() * 3;
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toRGB888: dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToRgb888(decoder_.frame(), widthScaled(), heightScaled(), dst);
     return needed;
   }
@@ -491,7 +506,10 @@ class TinyH264Decoder {
   size_t toRGB888(int x, int y, int dx, int dy, uint8_t* dst,
                   size_t dstCapacity) const {
     size_t needed = (size_t)dx * (size_t)dy * 3;
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toRGB888(windowed): dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToRgb888(decoder_.frame(), widthScaled(), heightScaled(), x, y, dx,
                          dy, dst);
     return needed;
@@ -518,7 +536,10 @@ class TinyH264Decoder {
   size_t toYUV420(uint8_t* dst, size_t dstCapacity) const {
     int w = widthScaled(), h = heightScaled();
     size_t needed = (size_t)w * h + 2 * (size_t)(w / 2) * (size_t)(h / 2);
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toYUV420: dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToYuv420(decoder_.frame(), w, h, dst);
     return needed;
   }
@@ -536,7 +557,10 @@ class TinyH264Decoder {
   size_t toYUV420(int x, int y, int dx, int dy, uint8_t* dst,
                   size_t dstCapacity) const {
     size_t needed = (size_t)dx * dy + 2 * (size_t)(dx / 2) * (size_t)(dy / 2);
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toYUV420(windowed): dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToYuv420(decoder_.frame(), widthScaled(), heightScaled(), x, y, dx,
                          dy, dst);
     return needed;

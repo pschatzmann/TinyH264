@@ -29,7 +29,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <vector>
-#include "../../src/MemoryResource.h"
+#include "../../src/common/MemoryResource.h"
 #include "../../src/StdAllocator.h"
 #include "../../src/TinyH264Decoder.h"
 #include "../../src/TinyH264Encoder.h"

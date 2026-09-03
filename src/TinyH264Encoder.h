@@ -1,10 +1,8 @@
 #pragma once
 #include <cstring>
 
-#include "MemoryResource.h"
+#include "common/MemoryResource.h"
 #include "StdAllocator.h"
-#include "common/h264_buffer.h"
-#include "encoder/h264_color_convert.h"
 #include "encoder/h264_encoder.h"
 #include "encoder/h264_hw_encoder_p4.h"
 #ifdef ESP32
@@ -51,8 +49,8 @@
 // There is deliberately no public way to force an I-frame or P-frame on a
 // specific call - setKeyframeInterval() (periodic) and setSize() (a
 // resolution change always forces an I-frame) are the only ways to
-// influence *when* a keyframe happens; see Encoder's own file header
-// comment (encoder/h264_encoder.h) for why.
+// influence *when* a keyframe happens; see SoftwareEncoder's own file
+// header comment (encoder/h264_encoder.h) for why.
 //
 // The Allocator template parameter (default StdAllocator<uint8_t>, see
 // StdAllocator.h) is used for the picture buffers this class holds
@@ -61,8 +59,9 @@
 // comment for why an encoder needs one at all). TinyH264Encoder itself
 // stays templated on Allocator for a stable public API, but internally
 // builds an AllocatorMemoryResource<Allocator> (see MemoryResource.h)
-// and hands that down to the non-templated SoftwareEncoder it wraps -
-// exactly the same PSRAM-placement mechanism TinyH264Decoder offers:
+// and hands that down to the non-templated SoftwareEncoder/HwEncoderP4 it
+// wraps - exactly the same PSRAM-placement mechanism TinyH264Decoder
+// offers:
 //   TinyH264Encoder<PSRAMAllocatorESP32<uint8_t>> encoder;
 // An out-of-memory allocation failure surfaces as a 0 return from
 // encodeFrame() (and its color-format overloads) or from begin(),
@@ -74,13 +73,20 @@
 namespace tinyh264 {
 
 /**
- * Public-facing encoder API: wraps the internal SoftwareEncoder (see
- * encoder/h264_encoder.h) behind encodeFrame() and its color-format
- * siblings, which take raw pixel data and produce a complete Annex-B
- * bitstream, without the caller needing to know anything about NAL
- * units, slices, or macroblocks. `Allocator` controls where the
- * reconstructed-picture buffers are allocated - see the file comment
- * above for the PSRAM usage example.
+ * Public-facing encoder API: wraps a single concreteEncoder_ instance
+ * behind encodeFrame() and its color-format siblings, which take raw
+ * pixel data and produce a complete Annex-B bitstream, without the
+ * caller needing to know anything about NAL units, slices, or
+ * macroblocks. `Allocator` controls where the reconstructed-picture
+ * buffers are allocated - see the file comment above for the PSRAM usage
+ * example.
+ *
+ * Holds no hardware-specific logic of its own: on a build where ESP32-P4's
+ * hardware encoder is available, concreteEncoder_'s type is HwEncoderP4
+ * (encoder/h264_hw_encoder_p4.h) - itself a SoftwareEncoder subclass that
+ * tries real hardware first and falls back to its own inherited software
+ * implementation - so this class only ever needs to forward calls
+ * straight through, regardless of which concrete type it holds.
  */
 template <typename Allocator = StdAllocator<uint8_t>>
 class TinyH264Encoder {
@@ -96,16 +102,7 @@ class TinyH264Encoder {
    * before this constructor existed.
    */
   TinyH264Encoder(int width = 0, int height = 0, int keyframeInterval = 0)
-      : encoder_(memRes_, width, height, keyframeInterval)
-#ifdef TINYH264_HW_ENCODER_P4_AVAILABLE
-        ,
-        hwScratch_(memRes_)
-#endif
-  {
-    width_ = width;
-    height_ = height;
-    keyframeInterval_ = keyframeInterval;
-  }
+      : concreteEncoder_(memRes_, width, height, keyframeInterval) {}
 
   /**
    * True if this build can actually use ESP32-P4's dedicated hardware
@@ -140,9 +137,7 @@ class TinyH264Encoder {
    * The hardware path is a genuinely different implementation, with a
    * deliberately narrower feature set than the software one - see
    * `HwEncoderP4`'s own file header for the full scope/validation-status
-   * disclaimer (this is the one part of the library that hasn't been
-   * validated the way everything else has - no pixel-diff oracle exists
-   * for real hardware output). While hardware mode is active:
+   * disclaimer. While hardware mode is active:
    * - `setQp()` sets the one fixed QP used for the whole stream - the
    *   hardware driver doesn't support `setTargetBitrate()`-style rate
    *   control in this version (unlike the software path, there's no
@@ -151,8 +146,10 @@ class TinyH264Encoder {
    *   returning 0 - if none was ever given).
    * - `setKeyframeInterval()` becomes the hardware's own GOP size.
    * - `setMotionSearchRange()`/`setMotionSearchAlgorithm()`/
-   *   `setAllOptimizationsActive()` and `setTargetBitrate()` are
-   *   software-encoder-specific and silently ignored in hardware mode.
+   *   `setAllOptimizationsActive()`/`setTargetBitrate()` are software-
+   *   encoder-specific - each now returns `false` while hardware mode
+   *   is active (still applied to the inherited software fallback, just
+   *   not to hardware itself - see each one's own comment).
    * - Unlike the software path, there's no per-call I/P decision to
    *   reason about - the hardware decides GOP placement entirely on its
    *   own once opened.
@@ -162,23 +159,25 @@ class TinyH264Encoder {
    * values) rather than by this call itself.
    */
   bool setUseHardware(bool enable) {
-    if (enable && !hardwareAvailable()) return false;
-    if (useHardware_ != enable) hwConfigDirty_ = true;
-    useHardware_ = enable;
-    // An explicit enable is a deliberate request to try hardware again -
-    // give it a fresh chance even if a previous attempt (this session's
-    // default-on behavior, or an earlier explicit enable) already set
-    // hwEncodeFailed_. Without this, encodeHwPlanar()/encodeHwScratch()'s
-    // own hwEncodeFailed_ short-circuit (checked *before*
-    // ensureHardwareReady(), which is otherwise the only place that
-    // clears it) would keep it permanently stuck failed.
-    if (enable) hwEncodeFailed_ = false;
-    return true;
+#ifdef TINYH264_HW_ENCODER_P4_AVAILABLE
+    return concreteEncoder_.setUseHardware(enable);
+#else
+    if (enable) {
+      H264LOG.warn("TinyH264Encoder::setUseHardware(true) requested but this build has no hardware encoder support");
+    }
+    return !enable;
+#endif
   }
 
   /// Whether `encodeFrame()` (and its color-format overloads) currently
   /// route through ESP32-P4's hardware encoder - see setUseHardware().
-  bool useHardware() const { return useHardware_; }
+  bool useHardware() const {
+#ifdef TINYH264_HW_ENCODER_P4_AVAILABLE
+    return concreteEncoder_.useHardware();
+#else
+    return false;
+#endif
+  }
 
   /**
    * Encodes one picture, automatically deciding I-frame vs. P-frame -
@@ -204,16 +203,7 @@ class TinyH264Encoder {
    */
   size_t encodeFrame(const uint8_t* srcY, const uint8_t* srcU,
                       const uint8_t* srcV, uint8_t* dst, size_t dstCapacity) {
-    if (useHardware_ && !hwEncodeFailed_) {
-      int strideY = strideY_ > 0 ? strideY_ : width_;
-      int strideC = strideC_ > 0 ? strideC_ : width_ / 2;
-      size_t n = encodeHwPlanar(srcY, strideY, srcU, srcV, strideC, dst,
-                                 dstCapacity);
-      if (n > 0) return n;
-      // Hardware failed - fall through to the software encoder rather
-      // than returning 0.
-    }
-    return encoder_.encodeFrame(srcY, srcU, srcV, dst, dstCapacity);
+    return concreteEncoder_.encodeFrame(srcY, srcU, srcV, dst, dstCapacity);
   }
 
   /**
@@ -227,18 +217,7 @@ class TinyH264Encoder {
    */
   size_t encodeFrameRgb888(const uint8_t* rgb, uint8_t* dst,
                             size_t dstCapacity) {
-    if (useHardware_ && !hwEncodeFailed_) {
-      int stride = packedStride_ > 0 ? packedStride_ : width_ * 3;
-      if (prepareHwScratch()) {
-        convertRgb888ToYuv420(rgb, stride, width_, height_, hwScratchY(),
-                               width_, hwScratchU(), hwScratchV(), width_ / 2);
-        size_t n = encodeHwScratch(dst, dstCapacity);
-        if (n > 0) return n;
-      }
-      // Hardware failed (or scratch allocation failed) - fall through
-      // to the software encoder rather than returning 0.
-    }
-    return encoder_.encodeFrameRgb888(rgb, dst, dstCapacity);
+    return concreteEncoder_.encodeFrameRgb888(rgb, dst, dstCapacity);
   }
 
   /**
@@ -249,18 +228,7 @@ class TinyH264Encoder {
    */
   size_t encodeFrameRgb666(const uint8_t* rgb666, uint8_t* dst,
                             size_t dstCapacity) {
-    if (useHardware_ && !hwEncodeFailed_) {
-      int stride = packedStride_ > 0 ? packedStride_ : width_ * 3;
-      if (prepareHwScratch()) {
-        convertRgb666ToYuv420(rgb666, stride, width_, height_, hwScratchY(),
-                               width_, hwScratchU(), hwScratchV(), width_ / 2);
-        size_t n = encodeHwScratch(dst, dstCapacity);
-        if (n > 0) return n;
-      }
-      // Hardware failed (or scratch allocation failed) - fall through
-      // to the software encoder rather than returning 0.
-    }
-    return encoder_.encodeFrameRgb666(rgb666, dst, dstCapacity);
+    return concreteEncoder_.encodeFrameRgb666(rgb666, dst, dstCapacity);
   }
 
   /**
@@ -271,18 +239,7 @@ class TinyH264Encoder {
    */
   size_t encodeFrameRgb565(const uint16_t* rgb565, uint8_t* dst,
                             size_t dstCapacity) {
-    if (useHardware_ && !hwEncodeFailed_) {
-      int stride = packedStride_ > 0 ? packedStride_ : width_;
-      if (prepareHwScratch()) {
-        convertRgb565ToYuv420(rgb565, stride, width_, height_, hwScratchY(),
-                               width_, hwScratchU(), hwScratchV(), width_ / 2);
-        size_t n = encodeHwScratch(dst, dstCapacity);
-        if (n > 0) return n;
-      }
-      // Hardware failed (or scratch allocation failed) - fall through
-      // to the software encoder rather than returning 0.
-    }
-    return encoder_.encodeFrameRgb565(rgb565, dst, dstCapacity);
+    return concreteEncoder_.encodeFrameRgb565(rgb565, dst, dstCapacity);
   }
 
   /**
@@ -293,18 +250,7 @@ class TinyH264Encoder {
    */
   size_t encodeFrameYuv422(const uint8_t* yuyv, uint8_t* dst,
                             size_t dstCapacity) {
-    if (useHardware_ && !hwEncodeFailed_) {
-      int stride = packedStride_ > 0 ? packedStride_ : width_ * 2;
-      if (prepareHwScratch()) {
-        convertYuyv422ToYuv420(yuyv, stride, width_, height_, hwScratchY(),
-                                width_, hwScratchU(), hwScratchV(), width_ / 2);
-        size_t n = encodeHwScratch(dst, dstCapacity);
-        if (n > 0) return n;
-      }
-      // Hardware failed (or scratch allocation failed) - fall through
-      // to the software encoder rather than returning 0.
-    }
-    return encoder_.encodeFrameYuv422(yuyv, dst, dstCapacity);
+    return concreteEncoder_.encodeFrameYuv422(yuyv, dst, dstCapacity);
   }
 
   /**
@@ -312,112 +258,99 @@ class TinyH264Encoder {
    * `setQp(-1)` explicitly) to let the encoder pick its own QP each
    * frame, adapted toward `bitsPerSecond` at `fps` frames/sec, instead
    * of a fixed QP. A real-time-appropriate feedback controller, not a
-   * two-pass/lookahead one - see Encoder::setTargetBitrate()'s own
-   * comment (encoder/h264_encoder.h) for exactly how it adapts. Must be
-   * called at least once before ever encoding with `qp == -1`; safe to
-   * call again later to retarget mid-sequence.
+   * two-pass/lookahead one - see SoftwareEncoder::setTargetBitrate()'s
+   * own comment (encoder/h264_encoder.h) for exactly how it adapts. Must
+   * be called at least once before ever encoding with `qp == -1`; safe
+   * to call again later to retarget mid-sequence. Returns `false` while
+   * hardware mode is active (see setUseHardware()) - the call still
+   * takes effect for the inherited software fallback, but hardware
+   * itself has no rate-control mode to apply it to.
    */
-  void setTargetBitrate(int bitsPerSecond, double fps) {
-    encoder_.setTargetBitrate(bitsPerSecond, fps);
+  bool setTargetBitrate(int bitsPerSecond, double fps) {
+    return concreteEncoder_.setTargetBitrate(bitsPerSecond, fps);
   }
-  // Note: setTargetBitrate() only affects the software encoder path -
-  // see setUseHardware()'s own comment for why the hardware path
-  // requires a fixed setQp() instead.
 
   /**
    * The QP actually used by the most recent encodeFrame()-family call -
    * the only way to find out what rate control chose when `qp == -1`.
    */
-  int lastQp() const { return encoder_.lastQp(); }
+  int lastQp() const { return concreteEncoder_.lastQp(); }
 
   /**
    * Configures automatic periodic keyframes for encodeFrame() (and its
    * color-format overloads) - a GOP size (keyframes land at picture 0,
-   * `frames`, `2*frames`, ...). See Encoder::setKeyframeInterval()'s own
-   * comment (encoder/h264_encoder.h) for exactly what it does and why
-   * `frames` should come from your actual frame rate, not a guessed
-   * constant. `frames <= 0` (the default) disables this.
+   * `frames`, `2*frames`, ...). See SoftwareEncoder::setKeyframeInterval()'s
+   * own comment (encoder/h264_encoder.h) for exactly what it does and
+   * why `frames` should come from your actual frame rate, not a guessed
+   * constant. `frames <= 0` (the default) disables this. In hardware
+   * mode (see setUseHardware()), this becomes the hardware's own GOP
+   * size instead.
    */
   void setKeyframeInterval(int frames) {
-    encoder_.setKeyframeInterval(frames);
-    if (keyframeInterval_ != frames) {
-      hwConfigDirty_ = true;
-      hwEncodeFailed_ = false;
-    }
-    keyframeInterval_ = frames;
+    concreteEncoder_.setKeyframeInterval(frames);
   }
 
   /**
    * Pre-establishes picture width/height for encodeFrame() (and its
-   * color-format overloads) - see Encoder::setSize()'s own comment
-   * (encoder/h264_encoder.h) for exactly what this does. Can be called
-   * before or after begin(); required before the first encodeFrame()
-   * call.
+   * color-format overloads) - see SoftwareEncoder::setSize()'s own
+   * comment (encoder/h264_encoder.h) for exactly what this does. Can be
+   * called before or after begin(); required before the first
+   * encodeFrame() call.
    */
   void setSize(int width, int height) {
-    encoder_.setSize(width, height);
-    if (width != width_ || height != height_) {
-      hwConfigDirty_ = true;
-      hwEncodeFailed_ = false;
-    }
-    width_ = width;
-    height_ = height;
+    concreteEncoder_.setSize(width, height);
   }
 
   /**
    * Overrides the Y/C plane row strides encodeFrame() uses - only needed
-   * for a padded source buffer; see Encoder::setStride()'s own comment
-   * for the tightly-packed default this replaces.
+   * for a padded source buffer; see SoftwareEncoder::setStride()'s own
+   * comment for the tightly-packed default this replaces.
    */
   void setStride(int strideY, int strideC) {
-    encoder_.setStride(strideY, strideC);
-    strideY_ = strideY;
-    strideC_ = strideC;
+    concreteEncoder_.setStride(strideY, strideC);
   }
 
   /**
    * Overrides the packed-row stride encodeFrameRgb888()/
    * encodeFrameRgb666()/encodeFrameRgb565()/encodeFrameYuv422() use -
-   * see Encoder::setPackedStride()'s own comment for the units (format-
-   * dependent) and tightly-packed default this replaces.
+   * see SoftwareEncoder::setPackedStride()'s own comment for the units
+   * (format-dependent) and tightly-packed default this replaces.
    */
   void setPackedStride(int stride) {
-    encoder_.setPackedStride(stride);
-    packedStride_ = stride;
+    concreteEncoder_.setPackedStride(stride);
   }
 
   /**
    * Overrides the `qp` encodeFrame() (and its color-format overloads)
-   * use - see Encoder::setQp()'s own comment (default -1: rate control
-   * via setTargetBitrate()). In hardware mode (see setUseHardware()),
-   * `qp` is the one fixed QP used for the whole stream - hardware mode
-   * has no rate-control sentinel, so a negative `qp` there makes
-   * encodeFrame() fail (return 0) until a real 0-51 value is set.
+   * use - see SoftwareEncoder::setQp()'s own comment (default -1: rate
+   * control via setTargetBitrate()). In hardware mode (see
+   * setUseHardware()), `qp` is the one fixed QP used for the whole
+   * stream - hardware mode has no rate-control sentinel, so a negative
+   * `qp` there makes encodeFrame() fail (return 0) until a real 0-51
+   * value is set.
    */
-  void setQp(int qp) {
-    encoder_.setQp(qp);
-    if (qp_ != qp) {
-      hwConfigDirty_ = true;
-      hwEncodeFailed_ = false;
-    }
-    qp_ = qp;
-  }
+  void setQp(int qp) { concreteEncoder_.setQp(qp); }
 
   /**
    * Overrides the +/-pixel window the motion search checks per
-   * P-macroblock - see Encoder::setMotionSearchRange()'s own comment
-   * (default 8) for the speed/compression tradeoff. Search cost is
-   * O(range^2); a smaller range encodes faster but can't represent
+   * P-macroblock - see SoftwareEncoder::setMotionSearchRange()'s own
+   * comment (default 8) for the speed/compression tradeoff. Search cost
+   * is O(range^2); a smaller range encodes faster but can't represent
    * motion larger than `range` pixels/frame (encoded via a bigger
-   * residual instead, not a correctness issue).
+   * residual instead, not a correctness issue). Returns `false` while
+   * hardware mode is active - motion search is software-only.
    */
-  void setMotionSearchRange(int range) { encoder_.setMotionSearchRange(range); }
+  bool setMotionSearchRange(int range) {
+    return concreteEncoder_.setMotionSearchRange(range);
+  }
   /// The current motion search range - see setMotionSearchRange().
-  int motionSearchRange() const { return encoder_.motionSearchRange(); }
+  int motionSearchRange() const {
+    return concreteEncoder_.motionSearchRange();
+  }
 
   /**
    * Selects the motion search algorithm - see
-   * Encoder::setMotionSearchAlgorithm()'s own comment (encoder/
+   * SoftwareEncoder::setMotionSearchAlgorithm()'s own comment (encoder/
    * h264_encoder.h) for the full tradeoff. Defaults to
    * `MotionSearchAlgorithm::Exhaustive` (a full, guaranteed-best-match
    * search within the window - this project's original, still-default
@@ -427,27 +360,34 @@ class TinyH264Encoder {
    * free win, so it's opt-in:
    *
    *   encoder.setMotionSearchAlgorithm(MotionSearchAlgorithm::Fast);
+   *
+   * Returns `false` while hardware mode is active - motion search is
+   * software-only.
    */
-  void setMotionSearchAlgorithm(MotionSearchAlgorithm algorithm) {
-    encoder_.setMotionSearchAlgorithm(algorithm);
+  bool setMotionSearchAlgorithm(MotionSearchAlgorithm algorithm) {
+    return concreteEncoder_.setMotionSearchAlgorithm(algorithm);
   }
   /// The current motion search algorithm - see setMotionSearchAlgorithm().
   MotionSearchAlgorithm motionSearchAlgorithm() const {
-    return encoder_.motionSearchAlgorithm();
+    return concreteEncoder_.motionSearchAlgorithm();
   }
 
   /**
    * Single switch for every optional, opt-in performance optimization -
-   * see Encoder::setAllOptimizationsActive()'s own comment (encoder/
-   * h264_encoder.h) for exactly what it does and doesn't touch (currently
-   * just setMotionSearchAlgorithm(); not setMotionSearchRange(), and not
-   * the always-on fixes that have no tradeoff to opt into):
+   * see SoftwareEncoder::setAllOptimizationsActive()'s own comment
+   * (encoder/h264_encoder.h) for exactly what it does and doesn't touch
+   * (currently just setMotionSearchAlgorithm(); not
+   * setMotionSearchRange(), and not the always-on fixes that have no
+   * tradeoff to opt into):
    *
    *   encoder.setAllOptimizationsActive(true);  // faster, real compression
    *                                              // tradeoff on some content
+   *
+   * Returns `false` while hardware mode is active - see
+   * setMotionSearchAlgorithm().
    */
-  void setAllOptimizationsActive(bool active) {
-    encoder_.setAllOptimizationsActive(active);
+  bool setAllOptimizationsActive(bool active) {
+    return concreteEncoder_.setAllOptimizationsActive(active);
   }
 
   /**
@@ -455,209 +395,88 @@ class TinyH264Encoder {
    * H264_MAX_HEIGHT ...` before `#include`ing this header - overrides
    * the picture-buffer/metadata-table/color-conversion-scratch
    * allocation ceiling for this encoder instance (see
-   * Encoder::setMaxDimension(), encoder/h264_encoder.h, for the full
-   * explanation). A setSize()/encodeFrame() call for a picture bigger
-   * than this fails and returns 0. Call before the first encode to size
-   * buffers for your actual content up front instead of the compile-time
-   * H264_MAX_WIDTH/H264_MAX_HEIGHT default (h264_config.h) - e.g.
-   * `encoder.setMaxDimension(176, 144);` in setup().
+   * SoftwareEncoder::setMaxDimension(), encoder/h264_encoder.h, for the
+   * full explanation). A setSize()/encodeFrame() call for a picture
+   * bigger than this fails and returns 0. Call before the first encode
+   * to size buffers for your actual content up front instead of the
+   * compile-time H264_MAX_WIDTH/H264_MAX_HEIGHT default (h264_config.h)
+   * - e.g. `encoder.setMaxDimension(176, 144);` in setup().
    */
   void setMaxDimension(int maxWidth, int maxHeight) {
-    encoder_.setMaxDimension(maxWidth, maxHeight);
+    concreteEncoder_.setMaxDimension(maxWidth, maxHeight);
   }
   /// The current allocation-ceiling width - see setMaxDimension().
-  int maxWidth() const { return encoder_.maxWidth(); }
+  int maxWidth() const { return concreteEncoder_.maxWidth(); }
   /// The current allocation-ceiling height - see setMaxDimension().
-  int maxHeight() const { return encoder_.maxHeight(); }
+  int maxHeight() const { return concreteEncoder_.maxHeight(); }
 
   /**
    * Reserves this encoder's picture buffers up front instead of the
-   * default allocate-on-first-encode behavior - see Encoder::begin()'s
-   * own comment (encoder/h264_encoder.h) for exactly what this does, why
-   * it's optional, and what `reserveColorConversionScratch` controls.
-   * Also resets any prior stream state, so it's safe to call again to
-   * start a fresh, unrelated sequence. Call once, typically from
-   * setup(), if you want any allocation failure to surface
-   * deterministically before encoding starts rather than mid-stream.
-   * Returns false if allocation failed - out of memory, not a crash -
-   * see StdAllocator.h.
+   * default allocate-on-first-encode behavior - see
+   * SoftwareEncoder::begin()'s own comment (encoder/h264_encoder.h) for
+   * exactly what this does, why it's optional, and what
+   * `reserveColorConversionScratch` controls. Also resets any prior
+   * stream state, so it's safe to call again to start a fresh, unrelated
+   * sequence. Call once, typically from setup(), if you want any
+   * allocation failure to surface deterministically before encoding
+   * starts rather than mid-stream. Returns false if allocation failed -
+   * out of memory, not a crash - see StdAllocator.h.
    */
   bool begin(bool reserveColorConversionScratch = false) {
-    return encoder_.begin(reserveColorConversionScratch);
+    return concreteEncoder_.begin(reserveColorConversionScratch);
   }
 
   /**
    * Releases this encoder's picture/scratch buffers and resets it to a
-   * fresh, just-constructed stream state - see Encoder::end()'s own
-   * comment for exactly what this does (and what it deliberately leaves
-   * untouched - setTargetBitrate()/setKeyframeInterval()/setQp()/
-   * setStride()/setPackedStride() configuration). Not required before
-   * destruction; only useful for reclaiming memory before that, e.g.
-   * between unrelated sequences, while this object is still alive. Safe
-   * to call begin()/encodeFrame() again afterward (after a fresh
-   * setSize() call, since end() does reset the established width/height).
+   * fresh, just-constructed stream state - see
+   * SoftwareEncoder::end()'s own comment for exactly what this does (and
+   * what it deliberately leaves untouched - setTargetBitrate()/
+   * setKeyframeInterval()/setQp()/setStride()/setPackedStride()
+   * configuration). In hardware mode, also closes the hardware device -
+   * see HwEncoderP4::end(). Not required before destruction; only useful
+   * for reclaiming memory before that, e.g. between unrelated sequences,
+   * while this object is still alive. Safe to call begin()/encodeFrame()
+   * again afterward (after a fresh setSize() call, since end() does
+   * reset the established width/height).
    */
-  void end() {
-    encoder_.end();
-#ifdef TINYH264_HW_ENCODER_P4_AVAILABLE
-    hw_.close();
-    hwScratch_.release();
-    hwConfigDirty_ = true;
-    hwEncodeFailed_ = false;
-#endif
-  }
+  void end() { concreteEncoder_.end(); }
 
   /**
    * The most recently encoded picture, reconstructed exactly as decoding
    * the just-produced bitstream back would give (deblocking filter
    * included) - useful for measuring this encoder's own quality (e.g.
    * PSNR against the source) without a separate decode pass, or for
-   * previewing what was just encoded.
+   * previewing what was just encoded. Reflects the *software* pipeline's
+   * own closed-loop reconstruction - in hardware mode, hardware doesn't
+   * feed its own output back through this, so these stay whatever the
+   * inherited SoftwareEncoder last reconstructed (typically empty,
+   * unless hardware fell back to software at least once).
    */
-  int width() const { return encoder_.frame().width; }
-  int height() const { return encoder_.frame().height; }
-  const uint8_t* y() const { return encoder_.frame().y(); }
-  const uint8_t* u() const { return encoder_.frame().u(); }
-  const uint8_t* v() const { return encoder_.frame().v(); }
-  int strideY() const { return encoder_.frame().strideY; }
-  int strideUV() const { return encoder_.frame().strideC; }
+  int width() const { return concreteEncoder_.frame().width; }
+  int height() const { return concreteEncoder_.frame().height; }
+  const uint8_t* y() const { return concreteEncoder_.frame().y(); }
+  const uint8_t* u() const { return concreteEncoder_.frame().u(); }
+  const uint8_t* v() const { return concreteEncoder_.frame().v(); }
+  int strideY() const { return concreteEncoder_.frame().strideY; }
+  int strideUV() const { return concreteEncoder_.frame().strideC; }
 
  private:
-  // Declared before encoder_ (and hwScratch_, below): members initialize
-  // in declaration order, and both of those need memRes_ already
-  // constructed to build from.
+  // Declared before concreteEncoder_: members initialize in declaration
+  // order, and concreteEncoder_ needs memRes_ already constructed to
+  // build from.
   AllocatorMemoryResource<Allocator> memRes_;
-  SoftwareEncoder encoder_;
-
-  // Cached copies of setSize()/setStride()/setPackedStride()/setQp()/
-  // setKeyframeInterval() - encoder_ (SoftwareEncoder) has no getters
-  // for its own equivalents, and the hardware path needs to read them
-  // back to (re)open HwEncoderP4 with matching configuration.
-  int width_ = 0;
-  int height_ = 0;
-  int strideY_ = 0;
-  int strideC_ = 0;
-  int packedStride_ = 0;
-  int qp_ = -1;
-  int keyframeInterval_ = 0;
-  bool useHardware_ = hardwareAvailable();
-  // True whenever open()-affecting configuration (size, qp, keyframe
-  // interval) changed since the hardware encoder was last opened -
-  // checked by ensureHardwareReady() to decide whether to reopen.
-  // Declared unconditionally since setSize()/setQp()/
-  // setKeyframeInterval() all write to it unconditionally too -
-  // harmless dead state on a build where the hardware path itself isn't
-  // available.
-  bool hwConfigDirty_ = true;
-  // Set the first time a real hw_.encode() call fails (as opposed to
-  // ensureHardwareReady() itself failing to open) - see
-  // encodeHwScratch()/encodeHwPlanar(). Once set, those two short-
-  // circuit to 0 immediately (checked *before* ensureHardwareReady(),
-  // so a stuck-failed hardware path never even attempts to reopen) -
-  // instead of paying hw_.encode()'s up-to-1-second timeout on every
-  // subsequent frame - and the public encodeFrame()-family methods
-  // (see each one's own "fall through to the software encoder" line)
-  // fall back to the software encoder instead of returning 0 to the
-  // caller. Because ensureHardwareReady() is unreachable once this is
-  // set, every setter that can plausibly change hardware's behavior
-  // (setUseHardware(true), setSize(), setQp(), setKeyframeInterval(),
-  // end()) clears it directly itself, alongside its own
-  // hwConfigDirty_ = true - not relying on ensureHardwareReady() to do
-  // it - so a genuine reconfiguration (which might behave differently)
-  // gets its own fresh chance rather than staying permanently opted
-  // out. Also cleared inside ensureHardwareReady() itself on a
-  // successful (re)open, for the same reason.
-  bool hwEncodeFailed_ = false;
-
+  // Every public method above calls straight into this one instance -
+  // no separate SoftwareEncoder/HwEncoderP4 pair and no pointer
+  // indirection to pick between them, since only one concrete type is
+  // ever constructed per build (this #ifdef) and it never changes at
+  // runtime. No hardware-specific logic lives in this class at all -
+  // it's entirely inside HwEncoderP4 itself, see
+  // encoder/h264_hw_encoder_p4.h.
 #ifdef TINYH264_HW_ENCODER_P4_AVAILABLE
-  HwEncoderP4 hw_;
-  Buffer<uint8_t> hwScratch_;
-
-  bool ensureHardwareReady() {
-    if (width_ <= 0 || height_ <= 0 || qp_ < 0) return false;
-    if (hw_.isOpen() && hw_.width() == width_ && hw_.height() == height_ &&
-        !hwConfigDirty_) {
-      return true;
-    }
-    if (!hw_.open(width_, height_, qp_, keyframeInterval_)) {
-      Serial.println("TinyH264Encoder: failed to open hardware encoder");
-      return false;
-    }
-    Serial.printf("TinyH264Encoder: opened hardware encoder %dx%d, qp=%d, keyframeInterval=%d\n",
-                  width_, height_, qp_, keyframeInterval_);
-    hwConfigDirty_ = false;
-    hwEncodeFailed_ = false;
-    return true;
-  }
-
-  bool prepareHwScratch() {
-    if (width_ <= 0 || height_ <= 0) return false;
-    size_t ySize = (size_t)width_ * height_;
-    size_t cSize = (size_t)(width_ / 2) * (height_ / 2);
-    size_t needed = ySize + 2 * cSize;
-    if (!hwScratch_.empty() && hwScratch_.size() != needed) {
-      hwScratch_.release();
-    }
-    return hwScratch_.allocate(needed);
-  }
-
-  uint8_t* hwScratchY() { return hwScratch_.data(); }
-  uint8_t* hwScratchU() {
-    return hwScratch_.data() + (size_t)width_ * height_;
-  }
-  uint8_t* hwScratchV() {
-    return hwScratchU() + (size_t)(width_ / 2) * (height_ / 2);
-  }
-
-  // Encodes hwScratch_ (already filled with tightly-packed YUV420 by a
-  // color-format overload's convert*ToYuv420() call) via the hardware
-  // encoder - shared tail end of encodeFrameRgb888()/Rgb666()/Rgb565()/
-  // Yuv422()'s hardware path.
-  size_t encodeHwScratch(uint8_t* dst, size_t dstCapacity) {
-    if (hwEncodeFailed_) return 0;
-    if (!ensureHardwareReady()) return 0;
-    size_t n = hw_.encode(hwScratchY(), width_, hwScratchU(), hwScratchV(),
-                          width_ / 2, dst, dstCapacity);
-    if (n == 0) {
-      Serial.println("TinyH264Encoder: hardware encode failed - falling back to the software encoder from now on");
-      hwEncodeFailed_ = true;
-    }
-    return n;
-  }
-
-  // Encodes separate Y/U/V planes (encodeFrame()'s own source shape)
-  // directly via the hardware encoder - no scratch copy needed, since
-  // HwEncoderP4::encode() itself takes strided Y/U/V planes (it does
-  // its own internal conversion to the packed pixel format the
-  // hardware requires).
-  size_t encodeHwPlanar(const uint8_t* srcY, int strideY, const uint8_t* srcU,
-                        const uint8_t* srcV, int strideC, uint8_t* dst,
-                        size_t dstCapacity) {
-    if (hwEncodeFailed_) return 0;
-    if (!ensureHardwareReady()) return 0;
-    size_t n = hw_.encode(srcY, strideY, srcU, srcV, strideC, dst, dstCapacity);
-    if (n == 0) {
-      Serial.println("TinyH264Encoder: hardware encode failed - falling back to the software encoder from now on");
-      hwEncodeFailed_ = true;
-    }
-    return n;
-  }
+  HwEncoderP4 concreteEncoder_;
 #else
-  // Unreachable stubs (useHardware_ can never be true without
-  // TINYH264_HW_ENCODER_P4_AVAILABLE - see setUseHardware()) that exist
-  // only so encodeFrame()/the color-format overloads' `if (useHardware_)`
-  // branches still compile on a build where the hardware path itself
-  // isn't available.
-  bool prepareHwScratch() { return false; }
-  size_t encodeHwScratch(uint8_t*, size_t) { return 0; }
-  size_t encodeHwPlanar(const uint8_t*, int, const uint8_t*, const uint8_t*,
-                        int, uint8_t*, size_t) {
-    return 0;
-  }
-  uint8_t* hwScratchY() { return nullptr; }
-  uint8_t* hwScratchU() { return nullptr; }
-  uint8_t* hwScratchV() { return nullptr; }
-#endif  // TINYH264_HW_ENCODER_P4_AVAILABLE
+  SoftwareEncoder concreteEncoder_;
+#endif
 };
 
 }  // namespace tinyh264

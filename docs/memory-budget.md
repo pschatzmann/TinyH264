@@ -119,7 +119,7 @@ largest of the "static-looking" costs above once resolution grows), and
 the encoder's RGB/YUV422 scratch buffers all follow whichever `Allocator`
 `TinyH264Decoder<Allocator>`/`TinyH264Encoder<Allocator>` was instantiated
 with - passed down at construction as a `MemoryResource` (see
-`src/MemoryResource.h`) to the `SoftwareDecoder`/`SoftwareEncoder` each
+`src/common/MemoryResource.h`) to the `SoftwareDecoder`/`SoftwareEncoder` each
 one wraps internally.
 Only the NAL/slice scratch buffer (`H264_MAX_NAL_SIZE`, a fixed-size
 array, not a heap allocation at all) and the SPS/PPS tables stay on

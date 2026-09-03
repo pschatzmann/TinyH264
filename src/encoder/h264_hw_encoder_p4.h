@@ -138,6 +138,7 @@
 #include "soc/interrupts.h"
 
 #include "h264_bitwriter.h"
+#include "h264_encoder.h"
 #include "h264_sps_pps_writer.h"
 
 namespace tinyh264 {
@@ -880,22 +881,49 @@ inline void convertYuv420ToPackedOuyyEvyy(const uint8_t* srcY, int strideY,
  * ROI/motion-vector-telemetry/rate-control left out entirely (this
  * project's own scope, not needed for a valid stream) and the unbounded
  * DMA-reset spin-wait replaced with a bounded one.
+ *
+ * Subclasses SoftwareEncoder (encoder/h264_encoder.h) rather than
+ * standing alone: `encodeFrame()`/`encodeFrameRgb888()`/
+ * `encodeFrameRgb666()`/`encodeFrameRgb565()`/`encodeFrameYuv422()`
+ * override the inherited versions to try real hardware first (via the
+ * `open()`/`close()`/`encode()` primitives below - unchanged, low-level,
+ * and still directly usable on their own, see
+ * examples/HwEncoderP4UnitTests), falling back to the inherited
+ * software implementation - `SoftwareEncoder::encodeFrame()` etc. -
+ * whenever hardware mode is off, not ready, or a real encode fails.
+ * `TinyH264Encoder` (see TinyH264Encoder.h) then only needs a single
+ * `SoftwareEncoder*` pointing at whichever concrete type it constructed
+ * (this class where hardware is available, plain SoftwareEncoder
+ * otherwise) - no hardware-specific code of its own.
  */
 // Diagnostic-only hook (weak, no-op unless a sketch defines it) - fires
 // right before frame_start is written, at the exact "armed and
 // configured, not yet started" point codec-h264-ESP32P4's own matching
-// hook (see that project's examples/RegisterDump) fires at too - see
-// this project's own examples/HwEncoderP4RegisterDump. extern "C" so
-// both sides use plain C linkage regardless of being compiled as C++.
+// hook (see that project's examples/RegisterDump) fires at too. extern
+// "C" so both sides use plain C linkage regardless of being compiled as
+// C++.
 extern "C" void h264_debug_before_frame_start_hook(void) __attribute__((weak));
 
-class HwEncoderP4 {
+class HwEncoderP4 : public SoftwareEncoder {
  public:
+  /**
+   * Constructs a HwEncoderP4 backed by `memRes` (forwarded to
+   * SoftwareEncoder's constructor - see its own comment; used for the
+   * inherited software-fallback picture buffers, not by the hardware
+   * path itself, which manages its own DMA buffers via heap_caps_malloc
+   * in open()/close() below). `width`/`height`/`keyframeInterval` are
+   * the same optional pre-configuration SoftwareEncoder's own
+   * constructor takes.
+   */
+  explicit HwEncoderP4(MemoryResource& memRes, int width = 0,
+                        int height = 0, int keyframeInterval = 0)
+      : SoftwareEncoder(memRes, width, height, keyframeInterval) {}
+
   ~HwEncoderP4() { close(); }
 
   bool isOpen() const { return opened_; }
-  int width() const { return width_; }
-  int height() const { return height_; }
+  int width() const { return hwWidth_; }
+  int height() const { return hwHeight_; }
 
   /**
    * Diagnostic-only (see `encodeDiagnostic()`'s own comment for the
@@ -936,24 +964,27 @@ class HwEncoderP4 {
    */
   bool open(int width, int height, int qp, int gop) {
     close();
-    if (width <= 0 || height <= 0 || (width % 16) != 0 || (height % 16) != 0)
+    if (width <= 0 || height <= 0 || (width % 16) != 0 || (height % 16) != 0) {
+      H264LOG.error("HwEncoderP4::open: invalid size %dx%d (must be >0 and a multiple of 16)",
+                     width, height);
       return false;
+    }
     if (qp < 0) qp = 0;
     if (qp > 51) qp = 51;
 
-    width_ = width;
-    height_ = height;
+    hwWidth_ = width;
+    hwHeight_ = height;
     mbWidth_ = (width + 15) >> 4;
     mbHeight_ = (height + 15) >> 4;
-    qp_ = qp;
-    gop_ = gop;
-    frameNum_ = 0;
+    hwQp_ = qp;
+    hwGop_ = gop;
+    hwFrameNum_ = 0;
 
     hw_p4_detail::h264ClockAndResetInit();
     hw_p4_detail::h264SetSys();
-    hw_p4_detail::h264SetGop((uint8_t)(gop_ > 0 ? gop_ : 0), true);
+    hw_p4_detail::h264SetGop((uint8_t)(hwGop_ > 0 ? hwGop_ : 0), true);
     hw_p4_detail::h264SetMb((uint8_t)mbWidth_, (uint8_t)mbHeight_);
-    hw_p4_detail::h264SetQp((uint8_t)qp_);
+    hw_p4_detail::h264SetQp((uint8_t)hwQp_);
     hw_p4_detail::h264SetDbBypass(false);
     hw_p4_detail::h264SetRoiFixedQpPassthrough();
     hw_p4_detail::h264SetRoiFixedQpPassthroughCtrl1();
@@ -976,6 +1007,8 @@ class HwEncoderP4 {
     hw_p4_detail::dmaSetAllBurstSize(4);  // 128-byte bursts
 
     if (!allocateBuffersAndDescriptors()) {
+      H264LOG.error("HwEncoderP4::open: DMA buffer/descriptor allocation failed at %dx%d",
+                     width, height);
       close();
       return false;
     }
@@ -984,11 +1017,13 @@ class HwEncoderP4 {
     esp_err_t err = esp_intr_alloc(ETS_H264_REG_INTR_SOURCE, 0, &HwEncoderP4::isrThunk,
                                     this, &intrHandle_);
     if (err != ESP_OK) {
+      H264LOG.error("HwEncoderP4::open: esp_intr_alloc failed (err=%d)", (int)err);
       close();
       return false;
     }
     frameDoneSem_ = xSemaphoreCreateBinary();
     if (!frameDoneSem_) {
+      H264LOG.error("HwEncoderP4::open: xSemaphoreCreateBinary failed");
       close();
       return false;
     }
@@ -1026,7 +1061,7 @@ class HwEncoderP4 {
     free(packedYuvScratch_); packedYuvScratch_ = nullptr;
     packedYuvScratchSize_ = 0;
     opened_ = false;
-    width_ = height_ = 0;
+    hwWidth_ = hwHeight_ = 0;
   }
 
   /**
@@ -1057,11 +1092,12 @@ class HwEncoderP4 {
       // Timeout - matches Espressif's own recovery: force a core/DMA
       // reset so the next open()/encode() (or the next frame, since we
       // don't close() here) starts from a clean state.
+      H264LOG.error("HwEncoderP4::encode: hardware timed out waiting for FRAME_DONE - resetting");
       hw_p4_detail::h264Reset();
       hw_p4_detail::dmaResetCounterDbtmp();
       hw_p4_detail::dmaResetCounterDb();
       hw_p4_detail::dmaResetCounterRef();
-      frameNum_ = 0;
+      hwFrameNum_ = 0;
       return 0;
     }
 
@@ -1071,9 +1107,11 @@ class HwEncoderP4 {
   /**
    * Diagnostic variant of encode() - NOT part of this class's supported
    * API, only for narrowing down exactly where the hardware pipeline
-   * stalls (see this project's own current, open "encode() always times
-   * out waiting for FRAME_DONE" issue). Identical to encode() up through
-   * starting the frame, but instead of blocking on the interrupt-driven
+   * stalls (kept for future debugging - the specific "encode() always
+   * times out waiting for FRAME_DONE" issue this was built to diagnose
+   * is resolved, see docs/esp32-p4-hardware-encoder-investigation.md).
+   * Identical to encode() up through starting the frame, but instead of
+   * blocking on the interrupt-driven
    * semaphore with one 1-second timeout, polls the raw interrupt status
    * register directly (bypassing the ISR/semaphore path entirely,
    * running the exact same status-handling logic `isr()` would via the
@@ -1137,13 +1175,176 @@ class HwEncoderP4 {
       hw_p4_detail::dmaResetCounterDbtmp();
       hw_p4_detail::dmaResetCounterDb();
       hw_p4_detail::dmaResetCounterRef();
-      frameNum_ = 0;
+      hwFrameNum_ = 0;
       return 0;
     }
     return finishFrame(dst, dstCapacity, nalStartOffset, outFrameLen);
   }
 
+  /**
+   * Switches the inherited encodeFrame()-family overrides below between
+   * trying real hardware first (`true`, the default - see the
+   * constructor's own doc comment: this class only exists on a build
+   * where hardware is genuinely available, so there's no
+   * `hardwareAvailable()`-style guard to apply here) and going straight
+   * to the inherited SoftwareEncoder implementation (`false`). An
+   * explicit `enable` is a deliberate request to give hardware a fresh
+   * chance even after a previous attempt set hwEncodeFailed_ - see that
+   * field's own comment.
+   */
+  bool setUseHardware(bool enable) {
+    useHardware_ = enable;
+    if (enable) hwEncodeFailed_ = false;
+    return true;
+  }
+  /// Whether the encodeFrame()-family overrides below currently try real
+  /// hardware first - see setUseHardware().
+  bool useHardware() const { return useHardware_; }
+
+  /**
+   * Encodes one picture via real ESP32-P4 hardware when possible,
+   * falling back to the inherited SoftwareEncoder::encodeFrame() (the
+   * software Baseline/CAVLC pipeline) whenever hardware mode is off,
+   * hardware isn't ready (see ensureHardwareReady()), or a real hardware
+   * encode attempt fails - see hwEncodeFailed_'s own comment for why a
+   * failure latches instead of retrying hardware every subsequent call.
+   */
+  size_t encodeFrame(const uint8_t* srcY, const uint8_t* srcU,
+                      const uint8_t* srcV, uint8_t* dst,
+                      size_t dstCapacity) override {
+    if (useHardware_ && ensureHardwareReady() && !hwEncodeFailed_) {
+      int strideY = defaultStrideY_ > 0 ? defaultStrideY_ : width_;
+      int strideC = defaultStrideC_ > 0 ? defaultStrideC_ : width_ / 2;
+      size_t n = encode(srcY, strideY, srcU, srcV, strideC, dst, dstCapacity);
+      if (n > 0) return n;
+      hwEncodeFailed_ = true;
+      H264LOG.warn(
+          "HwEncoderP4: hardware encode (planar) failed - falling back to "
+          "the software encoder from now on");
+    }
+    return SoftwareEncoder::encodeFrame(srcY, srcU, srcV, dst, dstCapacity);
+  }
+
+  /// Same as encodeFrame(), for RGB888 source data - see
+  /// SoftwareEncoder::encodeFrameRgb888()'s own comment for the source
+  /// format. Converts into the inherited yuvY_/yuvU_/yuvV_ scratch (see
+  /// prepareYuvScratch()) before handing it to hardware, same as the
+  /// inherited software path does for its own fallback.
+  size_t encodeFrameRgb888(const uint8_t* rgb, uint8_t* dst,
+                            size_t dstCapacity) override {
+    if (useHardware_ && ensureHardwareReady() && !hwEncodeFailed_) {
+      int stride = defaultPackedStride_ > 0 ? defaultPackedStride_ : width_ * 3;
+      if (prepareYuvScratch(width_, height_)) {
+        convertRgb888ToYuv420(rgb, stride, width_, height_, yuvY_.data(),
+                               width_, yuvU_.data(), yuvV_.data(), width_ / 2);
+        size_t n = encode(yuvY_.data(), width_, yuvU_.data(), yuvV_.data(),
+                           width_ / 2, dst, dstCapacity);
+        if (n > 0) return n;
+        hwEncodeFailed_ = true;
+        H264LOG.warn(
+            "HwEncoderP4: hardware encode (RGB888) failed - falling back to "
+            "the software encoder from now on");
+      }
+      // prepareYuvScratch() failed (transient allocation failure) - fall
+      // through without latching hwEncodeFailed_, same as encodeFrame()'s
+      // own ensureHardwareReady()-fails case.
+    }
+    return SoftwareEncoder::encodeFrameRgb888(rgb, dst, dstCapacity);
+  }
+
+  /// Same as encodeFrameRgb888(), for RGB666 source data.
+  size_t encodeFrameRgb666(const uint8_t* rgb666, uint8_t* dst,
+                            size_t dstCapacity) override {
+    if (useHardware_ && ensureHardwareReady() && !hwEncodeFailed_) {
+      int stride = defaultPackedStride_ > 0 ? defaultPackedStride_ : width_ * 3;
+      if (prepareYuvScratch(width_, height_)) {
+        convertRgb666ToYuv420(rgb666, stride, width_, height_, yuvY_.data(),
+                               width_, yuvU_.data(), yuvV_.data(), width_ / 2);
+        size_t n = encode(yuvY_.data(), width_, yuvU_.data(), yuvV_.data(),
+                           width_ / 2, dst, dstCapacity);
+        if (n > 0) return n;
+        hwEncodeFailed_ = true;
+        H264LOG.warn(
+            "HwEncoderP4: hardware encode (RGB666) failed - falling back to "
+            "the software encoder from now on");
+      }
+    }
+    return SoftwareEncoder::encodeFrameRgb666(rgb666, dst, dstCapacity);
+  }
+
+  /// Same as encodeFrameRgb888(), for RGB565 source data.
+  size_t encodeFrameRgb565(const uint16_t* rgb565, uint8_t* dst,
+                            size_t dstCapacity) override {
+    if (useHardware_ && ensureHardwareReady() && !hwEncodeFailed_) {
+      int stride = defaultPackedStride_ > 0 ? defaultPackedStride_ : width_;
+      if (prepareYuvScratch(width_, height_)) {
+        convertRgb565ToYuv420(rgb565, stride, width_, height_, yuvY_.data(),
+                               width_, yuvU_.data(), yuvV_.data(), width_ / 2);
+        size_t n = encode(yuvY_.data(), width_, yuvU_.data(), yuvV_.data(),
+                           width_ / 2, dst, dstCapacity);
+        if (n > 0) return n;
+        hwEncodeFailed_ = true;
+        H264LOG.warn(
+            "HwEncoderP4: hardware encode (RGB565) failed - falling back to "
+            "the software encoder from now on");
+      }
+    }
+    return SoftwareEncoder::encodeFrameRgb565(rgb565, dst, dstCapacity);
+  }
+
+  /// Same as encodeFrameRgb888(), for YUYV-order packed YUV 4:2:2 source
+  /// data.
+  size_t encodeFrameYuv422(const uint8_t* yuyv, uint8_t* dst,
+                            size_t dstCapacity) override {
+    if (useHardware_ && ensureHardwareReady() && !hwEncodeFailed_) {
+      int stride = defaultPackedStride_ > 0 ? defaultPackedStride_ : width_ * 2;
+      if (prepareYuvScratch(width_, height_)) {
+        convertYuyv422ToYuv420(yuyv, stride, width_, height_, yuvY_.data(),
+                                width_, yuvU_.data(), yuvV_.data(), width_ / 2);
+        size_t n = encode(yuvY_.data(), width_, yuvU_.data(), yuvV_.data(),
+                           width_ / 2, dst, dstCapacity);
+        if (n > 0) return n;
+        hwEncodeFailed_ = true;
+        H264LOG.warn(
+            "HwEncoderP4: hardware encode (YUV422) failed - falling back to "
+            "the software encoder from now on");
+      }
+    }
+    return SoftwareEncoder::encodeFrameYuv422(yuyv, dst, dstCapacity);
+  }
+
+  /// Releases the hardware device (see close()) in addition to the
+  /// inherited SoftwareEncoder::end()'s own picture-buffer release.
+  void end() override {
+    close();
+    hwEncodeFailed_ = false;
+    SoftwareEncoder::end();
+  }
+
  private:
+  /**
+   * Opens (or reopens) the hardware device to match the inherited
+   * width_/height_/defaultQp_/keyframeInterval_ - the same config
+   * SoftwareEncoder's own encodeFrame()-family methods already read, so
+   * there's no separate cached copy to keep in sync. Compares against
+   * hwWidth_/hwHeight_/hwQp_/hwGop_ (what open() was last *attempted*
+   * with, successful or not - open() writes these before anything that
+   * can fail) rather than tracking a separate "config changed" flag by
+   * hand in every setter.
+   */
+  bool ensureHardwareReady() {
+    if (width_ <= 0 || height_ <= 0 || defaultQp_ < 0) return false;
+    if (opened_ && hwWidth_ == width_ && hwHeight_ == height_ &&
+        hwQp_ == defaultQp_ && hwGop_ == keyframeInterval_) {
+      return true;
+    }
+    // Config changed since the last open() attempt - give hardware a
+    // fresh chance even if that attempt (at a *different* config) had
+    // set hwEncodeFailed_.
+    hwEncodeFailed_ = false;
+    return open(width_, height_, defaultQp_, keyframeInterval_);
+  }
+
   /**
    * The shared setup every encode()-family method needs: converts the
    * source picture, writes SPS/PPS (if this is an IDR)/the slice header
@@ -1163,12 +1364,12 @@ class HwEncoderP4 {
                              size_t& outOutFrameLen) {
     if (!opened_ || !dst) return false;
 
-    bool isIdr = (frameNum_ == 0) || (gop_ > 0 && (frameNum_ % gop_) == 0);
-    if (isIdr) frameNum_ = 0;
+    bool isIdr = (hwFrameNum_ == 0) || (hwGop_ > 0 && (hwFrameNum_ % hwGop_) == 0);
+    if (isIdr) hwFrameNum_ = 0;
 
     if (!ensurePackedScratch()) return 0;
     hw_p4_detail::convertYuv420ToPackedOuyyEvyy(
-        srcY, strideY, srcU, srcV, strideC, width_, height_,
+        srcY, strideY, srcU, srcV, strideC, hwWidth_, hwHeight_,
         packedYuvScratch_);
     hw_p4_detail::cacheWriteback(packedYuvScratch_, packedYuvScratchSize_);
 
@@ -1182,7 +1383,7 @@ class HwEncoderP4 {
       // resolution/fps -> level lookup table - a real simplification,
       // not a correctness requirement (decoders don't reject a stream
       // for declaring a higher level than it strictly needs).
-      writeSpsRbsp(spsBw, width_, height_, /*levelIdc=*/42,
+      writeSpsRbsp(spsBw, hwWidth_, hwHeight_, /*levelIdc=*/42,
                    /*maxNumRefFrames=*/1);
       size_t n = writeNalUnit(dst + o, dstCapacity - o, /*nalRefIdc=*/3,
                                /*nalType=*/7, rbsp, spsBw.bytesWritten());
@@ -1196,7 +1397,7 @@ class HwEncoderP4 {
       // tested here as a hypothesis for the slice-header-bit-length
       // mismatch fed into the 8-byte-alignment register split, see
       // README's investigation history.
-      writePpsRbsp(ppsBw, qp_, /*dbEna=*/true);
+      writePpsRbsp(ppsBw, hwQp_, /*dbEna=*/true);
       n = writeNalUnit(dst + o, dstCapacity - o, /*nalRefIdc=*/3,
                         /*nalType=*/8, rbsp, ppsBw.bytesWritten());
       if (n == 0) return 0;
@@ -1226,7 +1427,7 @@ class HwEncoderP4 {
     // the DMA-written bytes against what was written pre-encode.
     //
     // This project's hardware path is always fixed-QP (ensureHardwareReady()
-    // requires qp_ >= 0), so slice_qp_delta is always 0 and frame_num is
+    // requires hwQp_ >= 0), so slice_qp_delta is always 0 and frame_num is
     // fixed-width - meaning every P-frame's slice header here is exactly
     // the same bit length (verified: 22 bits, with dbEna=true). 9 bytes
     // is the smallest AUD size (padded past the standard single-byte
@@ -1258,9 +1459,9 @@ class HwEncoderP4 {
     if (isIdr) {
       writeSliceHeaderIdr(hbw, /*dbEna=*/true);
     } else {
-      // Fixed QP: ppsBaseQp == qp_ always, so slice_qp_delta is always 0
+      // Fixed QP: ppsBaseQp == hwQp_ always, so slice_qp_delta is always 0
       // - no live rate control, matching this file's documented scope.
-      writeSliceHeaderP(hbw, frameNum_, qp_, qp_, /*dbEna=*/true);
+      writeSliceHeaderP(hbw, hwFrameNum_, hwQp_, hwQp_, /*dbEna=*/true);
     }
     if (hbw.error()) return 0;
     size_t rawBits = hbw.bitsWritten();
@@ -1307,7 +1508,13 @@ class HwEncoderP4 {
     // this project's current, fixed P-frame header bit length; this
     // catches it explicitly (rather than silently corrupting output
     // again) if that ever stops being true.
-    if ((size_t)(src - dst) < nalStartOffset + 4) return 0;
+    if ((size_t)(src - dst) < nalStartOffset + 4) {
+      H264LOG.error(
+          "HwEncoderP4: 8-byte split point (%zu) fell before nalStartOffset+4 "
+          "(%zu) - AUD padding invariant violated",
+          (size_t)(src - dst), nalStartOffset + 4);
+      return 0;
+    }
     uint32_t header[3] = {0, 0, 0};
     uint8_t* hdst = reinterpret_cast<uint8_t*>(&header[0]);
     for (size_t i = 0; i < unalignedBlen; i++) hdst[7 - i] = src[i];
@@ -1340,7 +1547,7 @@ class HwEncoderP4 {
     hw_p4_detail::configureDesc(
         dscYuv_, /*en2d=*/true, /*mode=*/1, /*vb=*/16,
         /*hb=*/(uint16_t)(96 / 1.5f), /*eof=*/0, /*owner=*/1,
-        (uint16_t)height_, (uint16_t)width_, packedYuvScratch_, nullptr);
+        (uint16_t)hwHeight_, (uint16_t)hwWidth_, packedYuvScratch_, nullptr);
     hw_p4_detail::dmaSetOutLinkAddr(hw_p4_detail::kOutCh(0),
                                      (uint32_t)(uintptr_t)dscYuv_);
     uint32_t bufBsLen = (uint32_t)(dstCapacity - outFrameLen);
@@ -1353,7 +1560,7 @@ class HwEncoderP4 {
                                     (uint32_t)(uintptr_t)dscBs_);
 
     if (!startFrameDma(isIdr)) {
-      frameNum_ = 0;
+      hwFrameNum_ = 0;
       return false;
     }
 
@@ -1394,14 +1601,30 @@ class HwEncoderP4 {
     // report success with a length larger than the buffer supplied.
     if ((size_t)codedLen + outFrameLen > dstCapacity) overflow = true;
 
-    frameNum_++;
+    hwFrameNum_++;
     if (overflow) return 0;
     return (size_t)codedLen + outFrameLen;
   }
-  int width_ = 0, height_ = 0, mbWidth_ = 0, mbHeight_ = 0;
-  int qp_ = 26, gop_ = 0;
-  uint8_t frameNum_ = 0;
+  int hwWidth_ = 0, hwHeight_ = 0, mbWidth_ = 0, mbHeight_ = 0;
+  int hwQp_ = 26, hwGop_ = 0;
+  uint8_t hwFrameNum_ = 0;
   bool opened_ = false;
+
+  // See setUseHardware(). This class only exists in a build where
+  // hardware is genuinely available (unlike the old
+  // TinyH264Encoder::hardwareAvailable()-gated default), so hardware
+  // mode starts on.
+  bool useHardware_ = true;
+  // Set the first time a real encode() call fails (as opposed to
+  // ensureHardwareReady() itself failing to open) - see the
+  // encodeFrame()-family overrides above. Once set, those short-circuit
+  // to the inherited software path immediately instead of paying
+  // encode()'s up-to-1-second timeout on every subsequent frame.
+  // ensureHardwareReady() clears it again as soon as the caller's
+  // config (width_/height_/defaultQp_/keyframeInterval_) actually
+  // changes, so a genuine reconfiguration gets its own fresh chance
+  // rather than staying permanently opted out - see its own comment.
+  bool hwEncodeFailed_ = false;
 
   hw_p4_detail::H264DmaDesc* dscYuv_ = nullptr;
   hw_p4_detail::H264DmaDesc* dscBs_ = nullptr;
@@ -1478,7 +1701,7 @@ class HwEncoderP4 {
   }
 
   bool ensurePackedScratch() {
-    size_t needed = (size_t)width_ * (size_t)height_ * 3 / 2;
+    size_t needed = (size_t)hwWidth_ * (size_t)hwHeight_ * 3 / 2;
     if (packedYuvScratch_ && packedYuvScratchSize_ == needed) return true;
     free(packedYuvScratch_);
     packedYuvScratch_ = internalAlloc(needed);
@@ -1676,7 +1899,7 @@ class HwEncoderP4 {
   }
 
   void IRAM_ATTR isr() {
-    bool isIframe = (frameNum_ == 0);
+    bool isIframe = (hwFrameNum_ == 0);
     BaseType_t higherPriorityTaskWoken = pdFALSE;
     for (;;) {
       uint32_t status = hw_p4_detail::h264GetInterruptStatus();

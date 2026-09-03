@@ -1,6 +1,6 @@
 #pragma once
 #include <stdint.h>
-#include "../MemoryResource.h"
+#include "MemoryResource.h"
 #include "h264_buffer.h"
 #include "h264_config.h"
 #include "h264_tables.h"

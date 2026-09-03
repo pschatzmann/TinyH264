@@ -218,6 +218,52 @@ convention, or eagerly via `begin(true)` - see
 [Memory budget](memory-budget.md)) - calling only the plain
 `encodeFrame()` never pays for them.
 
+### Hardware encoder (ESP32-P4)
+
+On ESP32-P4 builds (chip revision < 3.0), `TinyH264Encoder` also has a
+dedicated hardware H.264 encoder path - `HwEncoderP4`
+(`src/encoder/h264_hw_encoder_p4.h`), a genuinely different
+implementation with a narrower feature set, ~140x faster than software
+at QCIF (see the [README](../README.md#performance) for measured
+numbers and the [investigation writeup](esp32-p4-hardware-encoder-investigation.md)
+for how it was root-caused). It's on by default wherever it's available
+- `hardwareAvailable()` reports whether this build has it at all (a
+compile-time answer, safe to call unconditionally); `setUseHardware(bool)`
+toggles it and `useHardware()` reads the current state:
+
+```cpp
+if (TinyH264Encoder<>::hardwareAvailable()) {
+  encoder.setUseHardware(true);  // the default already, shown explicitly here
+}
+```
+
+While hardware mode is active:
+- `setQp()` sets the one fixed QP used for the whole stream - the
+  hardware driver has no rate-control mode, so **`setTargetBitrate()`
+  only ever affects the software fallback**, not hardware itself
+  (`qp = -1`, `setTargetBitrate()`'s sentinel, makes `encodeFrame()`
+  skip the hardware attempt entirely and go straight to software - see
+  the README's own "Known limitation" note for why the two can't be
+  synced).
+- `setKeyframeInterval()` becomes the hardware's own GOP size.
+- `setMotionSearchRange()`/`setMotionSearchAlgorithm()`/
+  `setAllOptimizationsActive()`/`setTargetBitrate()` are software-only -
+  each now **returns `false`** while hardware mode is active (the call
+  still takes effect for the inherited software fallback, just not for
+  hardware itself), instead of the `void` these all used to be:
+  ```cpp
+  if (!encoder.setTargetBitrate(300000, 25.0)) {
+    // ignored - hardware mode is active; setQp() controls quality instead
+  }
+  ```
+- A real hardware encode failure falls back to the software encoder
+  automatically from then on, rather than returning `0` to the caller -
+  see [Logging](logging.md) for how that (and every other failure path
+  in this library) reports through `H264LOG`.
+
+`examples/EncodeSyntheticFrame` runs both the hardware and software
+paths back to back against the same content, labeled, in one sketch.
+
 ### Allocation failure handling
 
 `TinyH264Encoder` is templated on an allocator (`StdAllocator<uint8_t>`
@@ -229,7 +275,8 @@ an out-of-memory condition; instead, every `encodeFrame()`-family call
 `dst` buffer or invalid width/height/qp already were - a `0` return, with
 nothing usable written to `dst` - and `begin()` returns `false`. No new
 failure mode for callers to handle differently; an existing "did this
-call actually produce output?" check already covers it.
+call actually produce output?" check already covers it. Every one of
+these failures also logs via `H264LOG` - see [Logging](logging.md).
 
 Verified round-trip against real `ffmpeg` decode: I-frames bit-exact at
 QP 18 and above across the whole QP range 0-51, within +/-1 (a handful

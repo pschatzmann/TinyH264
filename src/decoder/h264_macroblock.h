@@ -3,6 +3,7 @@
 #ifdef TINYH264_DEBUG_MB
 #include <stdio.h>
 #endif
+#include "../common/Logger.h"
 #include "h264_bitreader.h"
 #include "h264_cavlc.h"
 #include "../common/h264_frame.h"
@@ -82,7 +83,11 @@ inline bool decodeLumaBlockFull(BitReader& br, MbDecodeContext& ctx,
 
   int32_t coeff[16];
   uint32_t totalCoeff = 0;
-  if (!residualBlockCavlc(br, nC, 16, coeff, &totalCoeff)) return false;
+  if (!residualBlockCavlc(br, nC, 16, coeff, &totalCoeff)) {
+    H264LOG.error("decodeLumaBlockFull: CAVLC residual decode failed at mb(%d,%d) blk=%d",
+                   ctx.mbX, ctx.mbY, blkIdx);
+    return false;
+  }
   ctx.mbInfo->at(ctx.mbX, ctx.mbY).nnz[blkIdx] = (uint8_t)totalCoeff;
 #ifdef TINYH264_DEBUG_MB
   if (ctx.mbY >= 6) {
@@ -119,7 +124,11 @@ inline bool decodeLumaBlockAc(BitReader& br, MbDecodeContext& ctx,
 
   int32_t coeff[15];
   uint32_t totalCoeff = 0;
-  if (!residualBlockCavlc(br, nC, 15, coeff, &totalCoeff)) return false;
+  if (!residualBlockCavlc(br, nC, 15, coeff, &totalCoeff)) {
+    H264LOG.error("decodeLumaBlockAc: CAVLC residual decode failed at mb(%d,%d) blk=%d",
+                   ctx.mbX, ctx.mbY, blkIdx);
+    return false;
+  }
   ctx.mbInfo->at(ctx.mbX, ctx.mbY).nnz[blkIdx] = (uint8_t)totalCoeff;
 
   int32_t block[16] = {0};
@@ -148,7 +157,11 @@ inline bool decodeChromaBlockAc(BitReader& br, MbDecodeContext& ctx,
 
   int32_t coeff[15];
   uint32_t totalCoeff = 0;
-  if (!residualBlockCavlc(br, nC, 15, coeff, &totalCoeff)) return false;
+  if (!residualBlockCavlc(br, nC, 15, coeff, &totalCoeff)) {
+    H264LOG.error("decodeChromaBlockAc: CAVLC residual decode failed at mb(%d,%d) plane=%d cx=%d cy=%d",
+                   ctx.mbX, ctx.mbY, plane, cx, cy);
+    return false;
+  }
   ctx.mbInfo->at(ctx.mbX, ctx.mbY).nnz[16 + plane * 4 + cy * 2 + cx] =
       (uint8_t)totalCoeff;
 
@@ -231,13 +244,19 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext& ctx,
     for (int i = 0; i < 24; i++) mb.nnz[i] = 16;
     mb.qpY = 0;
     *qpY = 0;
-    if (br.error()) return false;
+    if (br.error()) {
+      H264LOG.error("decodeMacroblockIntraWithType: I_PCM raw-sample read truncated at mb(%d,%d)",
+                     ctx.mbX, ctx.mbY);
+      return false;
+    }
     result->ok = true;
     return true;
   }
 
   bool is16x16 = mbTypeRaw >= 1 && mbTypeRaw <= 24;
   if (mbTypeRaw > 25) {
+    H264LOG.error("decodeMacroblockIntraWithType: mb_type=%u out of range at mb(%d,%d)",
+                   mbTypeRaw, ctx.mbX, ctx.mbY);
     result->unsupported = true;  // not a valid I-slice mb_type
     return true;
   }
@@ -250,6 +269,8 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext& ctx,
      * unsupported rather than silently mis-decoding 8x8-transform data.
      */
     if (ctx.pps->transform8x8ModeFlag) {
+      H264LOG.warn("decodeMacroblockIntraWithType: I_NxN + 8x8 transform not supported at mb(%d,%d)",
+                    ctx.mbX, ctx.mbY);
       result->unsupported = true;
       return true;
     }
@@ -289,7 +310,11 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext& ctx,
 
   if (!is16x16) {
     uint32_t cbpCode = br.ue();
-    if (cbpCode > 47) return false;
+    if (cbpCode > 47) {
+      H264LOG.error("decodeMacroblockIntraWithType: invalid coded_block_pattern %u at mb(%d,%d)",
+                     cbpCode, ctx.mbX, ctx.mbY);
+      return false;
+    }
     uint8_t cbpCombined = kCbpIntra4x4[cbpCode];
     mb.cbpLuma = cbpCombined & 0xF;
     mb.cbpChroma = cbpCombined >> 4;
@@ -318,7 +343,11 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext& ctx,
   }
 #endif
 
-  if (br.error()) return false;
+  if (br.error()) {
+    H264LOG.error("decodeMacroblockIntraWithType: bitstream error reading mb_qp_delta at mb(%d,%d)",
+                   ctx.mbX, ctx.mbY);
+    return false;
+  }
 
   // --- Luma residual ---------------------------------------------------
   if (is16x16) {
@@ -330,8 +359,11 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext& ctx,
     int nCdc = predictNc(bxA, bxB);
     int32_t dcCoeff[16];
     uint32_t dcTotalCoeff = 0;
-    if (!residualBlockCavlc(br, nCdc, 16, dcCoeff, &dcTotalCoeff))
+    if (!residualBlockCavlc(br, nCdc, 16, dcCoeff, &dcTotalCoeff)) {
+      H264LOG.error("decodeMacroblockIntraWithType: CAVLC I_16x16 luma DC decode failed at mb(%d,%d)",
+                     ctx.mbX, ctx.mbY);
       return false;
+    }
     int32_t dcBlock[16] = {0};
     for (int k = 0; k < 16; k++) dcBlock[kZigZag4x4[k]] = dcCoeff[k];
     hadamard4x4(dcBlock);
@@ -380,7 +412,11 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext& ctx,
     for (int plane = 0; plane < 2; plane++) {
       int32_t coeff[4];
       uint32_t totalCoeff = 0;
-      if (!residualBlockCavlc(br, -1, 4, coeff, &totalCoeff)) return false;
+      if (!residualBlockCavlc(br, -1, 4, coeff, &totalCoeff)) {
+        H264LOG.error("decodeMacroblockIntraWithType: CAVLC chroma DC decode failed at mb(%d,%d) plane=%d",
+                       ctx.mbX, ctx.mbY, plane);
+        return false;
+      }
       int32_t* dst = plane == 0 ? cbDc : crDc;
       dst[0] = coeff[0];
       dst[1] = coeff[1];
@@ -420,7 +456,11 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext& ctx,
     }
   }
 
-  if (br.error()) return false;
+  if (br.error()) {
+    H264LOG.error("decodeMacroblockIntraWithType: bitstream error at end of macroblock at mb(%d,%d)",
+                   ctx.mbX, ctx.mbY);
+    return false;
+  }
   result->ok = true;
   return true;
 }
@@ -436,6 +476,8 @@ inline bool decodeMacroblockIntra(BitReader& br, MbDecodeContext& ctx,
                                    int* qpY, MacroblockDecodeResult* result) {
   uint32_t mbTypeRaw = br.ue();
   if (mbTypeRaw > 25 || br.error()) {
+    H264LOG.error("decodeMacroblockIntra: invalid/truncated mb_type at mb(%d,%d)",
+                   ctx.mbX, ctx.mbY);
     *result = MacroblockDecodeResult();
     result->unsupported = true;
     return true;

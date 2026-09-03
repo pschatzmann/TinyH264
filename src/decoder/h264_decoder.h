@@ -2,7 +2,8 @@
 #include <stdint.h>
 #include <array>
 #include <utility>
-#include "../MemoryResource.h"
+#include "../common/Logger.h"
+#include "../common/MemoryResource.h"
 #include "h264_config.h"
 #include "h264_deblock.h"
 #include "../common/h264_frame.h"
@@ -149,10 +150,18 @@ class SoftwareDecoder {
     if (nal.type == kNalSps) {
       BitReader br(nal.rbsp, nal.rbspSize);
       Sps sps;
-      if (!parseSps(br, &sps)) return DecodeStatus::kError;
-      if (sps.unsupported) return DecodeStatus::kUnsupported;
+      if (!parseSps(br, &sps)) {
+        H264LOG.error("SoftwareDecoder: SPS parse failed (corrupt/truncated)");
+        return DecodeStatus::kError;
+      }
+      if (sps.unsupported) {
+        H264LOG.warn("SoftwareDecoder: SPS id=%d uses an unsupported feature", sps.id);
+        return DecodeStatus::kUnsupported;
+      }
       if (sps.codedWidth > (uint32_t)maxWidth_ ||
           sps.codedHeight > (uint32_t)maxHeight_) {
+        H264LOG.warn("SoftwareDecoder: SPS resolution %ux%u exceeds the allocation ceiling %dx%d",
+                      sps.codedWidth, sps.codedHeight, maxWidth_, maxHeight_);
         return DecodeStatus::kUnsupported;
       }
       spsTable_[sps.id % H264_MAX_SPS] = sps;
@@ -163,8 +172,14 @@ class SoftwareDecoder {
     if (nal.type == kNalPps) {
       BitReader br(nal.rbsp, nal.rbspSize);
       Pps pps;
-      if (!parsePps(br, &pps)) return DecodeStatus::kError;
-      if (pps.unsupported) return DecodeStatus::kUnsupported;
+      if (!parsePps(br, &pps)) {
+        H264LOG.error("SoftwareDecoder: PPS parse failed (corrupt/truncated)");
+        return DecodeStatus::kError;
+      }
+      if (pps.unsupported) {
+        H264LOG.warn("SoftwareDecoder: PPS id=%d uses an unsupported feature", pps.id);
+        return DecodeStatus::kUnsupported;
+      }
       ppsTable_[pps.id % H264_MAX_PPS] = pps;
       havePps_ = true;
       return DecodeStatus::kNeedMoreData;
@@ -216,6 +231,9 @@ class SoftwareDecoder {
     for (int i = 0; i < H264_MAX_REF_FRAMES; i++) {
       ok = refFrames_[i].ensureAllocated() && ok;
     }
+    if (!ok) {
+      H264LOG.error("SoftwareDecoder::begin: one or more picture buffer allocations failed");
+    }
     return ok;
   }
 
@@ -255,7 +273,11 @@ class SoftwareDecoder {
    * the picture's last macroblock has been decoded (pictureComplete).
    */
   DecodeStatus decodeSlice(const NalUnit& nal) {
-    if (!haveSps_ || !havePps_) return DecodeStatus::kError;
+    if (!haveSps_ || !havePps_) {
+      H264LOG.error("decodeSlice: slice NAL arrived before SPS/PPS (haveSps=%d, havePps=%d)",
+                     (int)haveSps_, (int)havePps_);
+      return DecodeStatus::kError;
+    }
 
     BitReader br(nal.rbsp, nal.rbspSize);
     /*
@@ -270,9 +292,15 @@ class SoftwareDecoder {
     (void)sliceTypeRaw;
 
     const Pps& pps = ppsTable_[ppsId % H264_MAX_PPS];
-    if (!pps.valid || pps.id != ppsId) return DecodeStatus::kError;
+    if (!pps.valid || pps.id != ppsId) {
+      H264LOG.error("decodeSlice: referenced PPS id=%u not found/cached", ppsId);
+      return DecodeStatus::kError;
+    }
     const Sps& sps = spsTable_[pps.spsId % H264_MAX_SPS];
-    if (!sps.valid || sps.id != pps.spsId) return DecodeStatus::kError;
+    if (!sps.valid || sps.id != pps.spsId) {
+      H264LOG.error("decodeSlice: referenced SPS id=%u not found/cached", pps.spsId);
+      return DecodeStatus::kError;
+    }
     currentSps_ = sps;  // see sps(), e.g. TinyH264Decoder::fps()
 
     /*
@@ -281,11 +309,20 @@ class SoftwareDecoder {
      */
     BitReader br2(nal.rbsp, nal.rbspSize);
     SliceHeader sh;
-    if (!parseSliceHeader(br2, nal, sps, pps, &sh)) return DecodeStatus::kError;
-    if (sh.unsupported) return DecodeStatus::kUnsupported;
+    if (!parseSliceHeader(br2, nal, sps, pps, &sh)) {
+      H264LOG.error("decodeSlice: slice header parse failed (corrupt/truncated)");
+      return DecodeStatus::kError;
+    }
+    if (sh.unsupported) {
+      H264LOG.warn("decodeSlice: slice header uses an unsupported feature");
+      return DecodeStatus::kUnsupported;
+    }
     int numActiveRefs = (int)sh.numRefIdxL0ActiveMinus1 + 1;
     if (sh.sliceType == kSliceP) {
-      if (refFrameCount_ == 0) return DecodeStatus::kError;
+      if (refFrameCount_ == 0) {
+        H264LOG.error("decodeSlice: P-slice with no reference pictures available yet");
+        return DecodeStatus::kError;
+      }
       /*
        * Checked in this order deliberately: refFrameCount_ can never
        * exceed maxRefFrames_ (the sliding-window insert caps it there),
@@ -295,7 +332,11 @@ class SoftwareDecoder {
        * report kError (implying corruption) instead of kUnsupported
        * (implying "raise H264_MAX_REF_FRAMES/call setMaxRefFrames()").
        */
-      if (numActiveRefs > maxRefFrames_) return DecodeStatus::kUnsupported;
+      if (numActiveRefs > maxRefFrames_) {
+        H264LOG.warn("decodeSlice: stream wants %d active refs, exceeds maxRefFrames_=%d",
+                      numActiveRefs, maxRefFrames_);
+        return DecodeStatus::kUnsupported;
+      }
       /*
        * Above the cap is ruled out above; a conformant encoder also never
        * signals more active refs than actually exist in the DPB yet
@@ -303,14 +344,22 @@ class SoftwareDecoder {
        * before num_ref_idx_l0_active_minus1 is raised) - seeing that here
        * means a corrupt/non-conformant stream.
        */
-      if (numActiveRefs > refFrameCount_) return DecodeStatus::kError;
+      if (numActiveRefs > refFrameCount_) {
+        H264LOG.error("decodeSlice: stream wants %d active refs, only %d exist in the DPB",
+                       numActiveRefs, refFrameCount_);
+        return DecodeStatus::kError;
+      }
     }
 
     if (sh.firstMbInSlice == 0) {
       if (!mbInfo_.reset(sps.picWidthInMbs, sps.picHeightInMbs)) {
+        H264LOG.error("decodeSlice: mbInfo_.reset(%u,%u) failed",
+                       sps.picWidthInMbs, sps.picHeightInMbs);
         return DecodeStatus::kAllocationError;
       }
       if (!curFrame_.setSize((int)sps.codedWidth, (int)sps.codedHeight)) {
+        H264LOG.error("decodeSlice: curFrame_.setSize(%u,%u) failed",
+                       sps.codedWidth, sps.codedHeight);
         return DecodeStatus::kAllocationError;
       }
       sliceCount_ = 0;
@@ -343,7 +392,11 @@ class SoftwareDecoder {
     while (mbAddr < totalMbs) {
       if (sh.sliceType == kSliceP) {
         uint32_t skipRun = br2.ue();
-        if (br2.error()) return DecodeStatus::kError;
+        if (br2.error()) {
+          H264LOG.error("decodeSlice: bitstream error reading mb_skip_run near mb(%d,%d)",
+                         mbAddr % mbWidth, mbAddr / mbWidth);
+          return DecodeStatus::kError;
+        }
         for (uint32_t s = 0; s < skipRun && mbAddr < totalMbs; s++) {
           ctx.mbX = mbAddr % mbWidth;
           ctx.mbY = mbAddr / mbWidth;
@@ -364,8 +417,15 @@ class SoftwareDecoder {
       bool ok = (sh.sliceType == kSliceP)
                     ? decodeMacroblockInter(br2, ctx, &qpY, &result)
                     : decodeMacroblockIntra(br2, ctx, &qpY, &result);
-      if (!ok) return DecodeStatus::kError;
-      if (result.unsupported) return DecodeStatus::kUnsupported;
+      if (!ok) {
+        H264LOG.error("decodeSlice: macroblock decode failed at mb(%d,%d)", ctx.mbX, ctx.mbY);
+        return DecodeStatus::kError;
+      }
+      if (result.unsupported) {
+        H264LOG.warn("decodeSlice: macroblock at mb(%d,%d) uses an unsupported feature",
+                      ctx.mbX, ctx.mbY);
+        return DecodeStatus::kUnsupported;
+      }
       tagDeblockParams(ctx, sh);
 
       mbAddr++;
@@ -408,7 +468,10 @@ class SoftwareDecoder {
          * don't guess" (see this file's own DecodeStatus::kUnsupported
          * policy) applies here too.
          */
-        if (!refFrames_[0].copyFrom(curFrame_)) return DecodeStatus::kAllocationError;
+        if (!refFrames_[0].copyFrom(curFrame_)) {
+          H264LOG.error("decodeSlice: refFrames_[0].copyFrom() failed - picture decoded but not saved as a reference");
+          return DecodeStatus::kAllocationError;
+        }
         refFrameCount_ = keep + 1;
       }
       return DecodeStatus::kOk;

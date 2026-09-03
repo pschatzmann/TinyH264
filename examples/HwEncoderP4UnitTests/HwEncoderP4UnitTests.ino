@@ -205,7 +205,8 @@ static void testDmaChannelResetInIsolation() {
 
 static void testOpenCloseLifecycle() {
   Serial.println("-- HwEncoderP4::open()/close() lifecycle --");
-  HwEncoderP4 hw;
+  AllocatorMemoryResource<StdAllocator<uint8_t>> mr;
+  HwEncoderP4 hw(mr);
   check("isOpen() == false before open()", !hw.isOpen());
   bool opened = hw.open(176, 144, /*qp=*/26, /*gop=*/0);
   check("open(176, 144, 26, 0)", opened);

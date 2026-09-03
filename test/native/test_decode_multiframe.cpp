@@ -8,7 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
-#include "../../src/MemoryResource.h"
+#include "../../src/common/MemoryResource.h"
 #include "../../src/StdAllocator.h"
 #include "../../src/decoder/h264_decoder.h"
 

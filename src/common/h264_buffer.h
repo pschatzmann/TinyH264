@@ -1,7 +1,8 @@
 #pragma once
 #include <stddef.h>
 #include <new>
-#include "../MemoryResource.h"
+#include "Logger.h"
+#include "MemoryResource.h"
 
 /*
  * Header-only. Buffer<T>: this project's std::vector replacement
@@ -88,7 +89,11 @@ class Buffer {
   bool allocate(size_t n) {
     if (data_) return true;
     T* p = tryAllocate(n);
-    if (!p) return false;
+    if (!p) {
+      H264LOG.error("Buffer::allocate(%zu x %zu bytes) failed - out of memory",
+                     n, sizeof(T));
+      return false;
+    }
     for (size_t i = 0; i < n; i++) new (&p[i]) T();
     data_ = p;
     size_ = n;
