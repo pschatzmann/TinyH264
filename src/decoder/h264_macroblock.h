@@ -22,10 +22,10 @@
  * h264_macroblock_inter.h, which shares the Intra decode path here for
  * the Intra-macroblock-inside-a-P-slice case.
  *
- * Everything here is templated on Allocator (the same parameter
- * TinyH264Decoder<Allocator> and Frame<Allocator> use) purely because it
- * all takes an MbDecodeContext<Allocator>, which holds Frame<Allocator>
- * pointers.
+ * Nothing here is templated - MbDecodeContext holds plain Frame/
+ * MbInfoTable pointers, both non-templated types backed by a
+ * MemoryResource chosen at construction (see ../MemoryResource.h) rather
+ * than a compile-time Allocator parameter.
  */
 
 namespace tinyh264 {
@@ -48,9 +48,8 @@ struct MacroblockDecodeResult {
 /// in this file and h264_macroblock_inter.h so they don't each need a long,
 /// repeated parameter list. `mbX`/`mbY` are updated by the caller (Decoder::
 /// decodeSlice()) before each macroblock.
-template <typename Allocator>
 struct MbDecodeContext {
-  Frame<Allocator>* frame;
+  Frame* frame;
   /*
    * RefPicList0 for the current slice (clause 8.2.4): refList[0] is the
    * most recently decoded reference picture, refList[numActiveRefs-1] the
@@ -60,9 +59,9 @@ struct MbDecodeContext {
    * window into Decoder::refFrames_. Unused (numActiveRefs == 0) for
    * I-slices.
    */
-  const Frame<Allocator>* refList[H264_MAX_REF_FRAMES] = {nullptr};
+  const Frame* refList[H264_MAX_REF_FRAMES] = {nullptr};
   int numActiveRefs = 0;
-  MbInfoTable<Allocator>* mbInfo;
+  MbInfoTable* mbInfo;
   const Sps* sps;
   const Pps* pps;
   int sliceId;
@@ -74,8 +73,7 @@ struct MbDecodeContext {
  * Inter case - clause 8.5.9 dequant then 8.5.12.2 inverse transform) and
  * adds it to the already-predicted pixels at the block's position.
  */
-template <typename Allocator>
-inline bool decodeLumaBlockFull(BitReader& br, MbDecodeContext<Allocator>& ctx,
+inline bool decodeLumaBlockFull(BitReader& br, MbDecodeContext& ctx,
                                  int blkIdx, int qp) {
   int bx = kBlk4x4X[blkIdx], by = kBlk4x4Y[blkIdx];
   int nA = lumaNeighborNnz(ctx, bx, by, -1, 0);
@@ -112,8 +110,7 @@ inline bool decodeLumaBlockFull(BitReader& br, MbDecodeContext<Allocator>& ctx,
  * clause 8.5.6) and adds it, using the given already Hadamard-transformed
  * and dequantized DC value at raster position 0.
  */
-template <typename Allocator>
-inline bool decodeLumaBlockAc(BitReader& br, MbDecodeContext<Allocator>& ctx,
+inline bool decodeLumaBlockAc(BitReader& br, MbDecodeContext& ctx,
                                int blkIdx, int qp, int32_t dcValue) {
   int bx = kBlk4x4X[blkIdx], by = kBlk4x4Y[blkIdx];
   int nA = lumaNeighborNnz(ctx, bx, by, -1, 0);
@@ -142,8 +139,7 @@ inline bool decodeLumaBlockAc(BitReader& br, MbDecodeContext<Allocator>& ctx,
  * transformed and dequantized chroma DC value at raster position 0
  * (clause 8.5.11), and adds it on top of the already-predicted samples.
  */
-template <typename Allocator>
-inline bool decodeChromaBlockAc(BitReader& br, MbDecodeContext<Allocator>& ctx,
+inline bool decodeChromaBlockAc(BitReader& br, MbDecodeContext& ctx,
                                  int plane, int cx, int cy, int chromaQp,
                                  int32_t dcValue) {
   int nA = chromaNeighborNnz(ctx, plane, cx, cy, -1, 0);
@@ -200,8 +196,7 @@ inline bool decodeChromaBlockAc(BitReader& br, MbDecodeContext<Allocator>& ctx,
  * PPS transform_8x8_mode, an out-of-range mb_type, etc.) - an actual
  * bitstream error is instead signaled by a `false` return.
  */
-template <typename Allocator>
-inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocator>& ctx,
+inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext& ctx,
                                            uint32_t mbTypeRaw, int* qpY,
                                            MacroblockDecodeResult* result) {
   *result = MacroblockDecodeResult();
@@ -437,8 +432,7 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocat
  * branch instead), then defers to decodeMacroblockIntraWithType() for
  * everything else.
  */
-template <typename Allocator>
-inline bool decodeMacroblockIntra(BitReader& br, MbDecodeContext<Allocator>& ctx,
+inline bool decodeMacroblockIntra(BitReader& br, MbDecodeContext& ctx,
                                    int* qpY, MacroblockDecodeResult* result) {
   uint32_t mbTypeRaw = br.ue();
   if (mbTypeRaw > 25 || br.error()) {

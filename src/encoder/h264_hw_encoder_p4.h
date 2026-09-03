@@ -110,6 +110,23 @@
 
 #ifdef TINYH264_HW_ENCODER_P4_AVAILABLE
 
+// h264_config.h (pulled in transitively by every other TinyH264 header
+// compiled earlier in this translation unit, e.g. via
+// encoder/h264_encoder.h) does `#pragma GCC optimize("O3")` with no
+// matching push/pop - that pragma applies to every function body parsed
+// afterward in the *same translation unit*, regardless of which header
+// it's textually in, until something changes it again. Left alone, that
+// silently forces this entire file - every register/DMA-descriptor
+// access below, including sequences whose correctness depends on real
+// instruction-count/timing, not just volatile ordering - to compile at
+// -O3 instead of whatever optimization level the actual build (Arduino
+// IDE / arduino-cli project settings) specified. Reset back to the
+// command-line-specified options for this file only, and restore
+// whatever was active before at the end, so the software codec paths
+// elsewhere keep getting the O3 they were turned on for.
+#pragma GCC push_options
+#pragma GCC reset_options
+
 #include <cstdint>
 #include <cstring>
 
@@ -748,8 +765,48 @@ inline void cacheWriteback(void* addr, size_t len) {
   esp_cache_msync(addr, len,
                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 }
+// M2C (invalidate) does NOT accept ESP_CACHE_MSYNC_FLAG_UNALIGNED - unlike
+// the C2M (writeback) direction above, the underlying ESP-IDF API
+// actively rejects the combination (a real, confirmed-at-runtime
+// ESP_LOGE from esp_cache_msync() itself: "M2C direction doesn't allow
+// ESP_CACHE_MSYNC_FLAG_UNALIGNED"). An earlier session added this flag
+// here for cross-helper consistency with cacheWriteback()/
+// dmaWritebackDesc() without checking the API actually permits it for
+// this direction - it doesn't, and the call was silently failing every
+// time as a result (return value never checked), meaning the CPU could
+// have been reading stale pre-DMA memory instead of the real hardware
+// output. Confirmed the SAME way in Espressif's own real driver -
+// esp_h264_cache.c's esp_h264_cache_check_and_invalidate() calls
+// esp_cache_msync() with no UNALIGNED flag either - so unlike
+// cacheWriteback(), which the API lets us call directly on any
+// caller-supplied, arbitrarily-aligned `dst`, invalidate requires the
+// region to actually be 64-byte (cache-line) aligned, both address and
+// length. `dst`/`dstCapacity` here are the *caller's* output buffer
+// (encode()'s own `dst` parameter - a plain array/malloc() in every
+// example this project ships), so they're not guaranteed aligned at
+// all. Round the requested region *outward* to the enclosing aligned
+// boundaries rather than requiring every caller to cache-align their
+// own buffers: safe with respect to `dst` itself (every byte CPU-wrote
+// into it, e.g. the SPS/PPS/NAL headers prepareAndStartFrame() writes
+// before the DMA even starts, was already writeback-flushed to real
+// memory earlier - see prepareAndStartFrame()'s own cacheWriteback()
+// call - so re-fetching a superset of it from memory is harmless).
+// Real, if narrow, residual risk: the rounded-out edges (at most 63
+// bytes short of `dst`, 63 bytes past `dst+len`) could discard any
+// *other*, unrelated data that happens to share those boundary cache
+// lines and has its own not-yet-written-back CPU changes at the exact
+// moment this runs - inherent to cache-line-granular hardware, not
+// something a software-only fix can fully eliminate, and the same
+// tradeoff any driver invalidating a not-necessarily-aligned
+// caller-supplied buffer has to make.
 inline void cacheInvalidate(void* addr, size_t len) {
-  esp_cache_msync(addr, len, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+  constexpr uintptr_t kCacheLineSize = 64;
+  uintptr_t start = reinterpret_cast<uintptr_t>(addr);
+  uintptr_t end = start + len;
+  uintptr_t alignedStart = start & ~(kCacheLineSize - 1);
+  uintptr_t alignedEnd = (end + kCacheLineSize - 1) & ~(kCacheLineSize - 1);
+  esp_cache_msync(reinterpret_cast<void*>(alignedStart),
+                   alignedEnd - alignedStart, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 }
 
 /// Fills one `H264DmaDesc` and writes it back - ported from
@@ -1133,11 +1190,60 @@ class HwEncoderP4 {
       o += n;
 
       BitWriter ppsBw(rbsp, sizeof(rbsp));
-      writePpsRbsp(ppsBw, qp_);
+      // dbEna=true: matches Espressif's real hardware-path driver, which
+      // always sets deblocking_filter_control_present_flag (see
+      // esp_h264_enc_hw_set_slice()'s hardcoded db_ena=true) - being
+      // tested here as a hypothesis for the slice-header-bit-length
+      // mismatch fed into the 8-byte-alignment register split, see
+      // README's investigation history.
+      writePpsRbsp(ppsBw, qp_, /*dbEna=*/true);
       n = writeNalUnit(dst + o, dstCapacity - o, /*nalRefIdc=*/3,
                         /*nalType=*/8, rbsp, ppsBw.bytesWritten());
       if (n == 0) return 0;
       o += n;
+    }
+
+    // P-frames only: prepend a 9-byte AUD (Access Unit Delimiter, NAL
+    // type 9 - safely skipped by any decoder, including this project's
+    // own, see Decoder::next()'s explicit "SEI, AUD, filler, etc."
+    // fallthrough) purely to push nalStartOffset far enough that the
+    // 8-byte-alignment split below can never land inside the slice
+    // NAL's own Annex-B start code.
+    //
+    // Root cause this works around: the split point is computed
+    // relative to the *absolute* start of `dst` (matching Espressif's
+    // own esp_h264_enc_hw_slice_header_align8() formula, ported
+    // verbatim - see that function's own comment), not relative to
+    // just the header. For I-frames, the preceding SPS/PPS
+    // (nalStartOffset ~20+) always keeps the natural split point past
+    // the slice's own start code. P-frames have no such prefix
+    // (nalStartOffset == 0 otherwise) - and once the held-back region
+    // reaches its documented maximum (7 bytes) it reaches all the way
+    // back into the start code itself. The hardware's own CAVLC
+    // emulation-prevention logic then treats those bytes as ordinary
+    // RBSP content, not a start code, and inserts a spurious 0x03
+    // after the first two 0x00 bytes - confirmed directly by comparing
+    // the DMA-written bytes against what was written pre-encode.
+    //
+    // This project's hardware path is always fixed-QP (ensureHardwareReady()
+    // requires qp_ >= 0), so slice_qp_delta is always 0 and frame_num is
+    // fixed-width - meaning every P-frame's slice header here is exactly
+    // the same bit length (verified: 22 bits, with dbEna=true). 9 bytes
+    // is the smallest AUD size (padded past the standard single-byte
+    // AUD payload with non-zero filler, to avoid the same
+    // emulation-prevention trap on the padding itself) that clears this
+    // specific, fixed bit length - re-derived from the split formula,
+    // not guessed. If this file's P-frame header content ever changes
+    // (rate control, a different dbEna policy, ...), the assertion
+    // right after the split computation below will catch a
+    // now-insufficient offset instead of silently corrupting output
+    // again.
+    if (!isIdr) {
+      if (o + 9 > dstCapacity) return 0;
+      dst[o++] = 0; dst[o++] = 0; dst[o++] = 0; dst[o++] = 1;  // start code
+      dst[o++] = 0x09;  // NAL header: forbidden=0, ref_idc=0, type=9 (AUD)
+      dst[o++] = 0xF0;  // primary_pic_type=7 (any) + rbsp_trailing_bits()
+      dst[o++] = 0x80; dst[o++] = 0x80; dst[o++] = 0x80;  // non-zero filler
     }
 
     size_t nalStartOffset = o;
@@ -1150,11 +1256,11 @@ class HwEncoderP4 {
     uint8_t rawHeader[16] = {0};
     BitWriter hbw(rawHeader, sizeof(rawHeader));
     if (isIdr) {
-      writeSliceHeaderIdr(hbw);
+      writeSliceHeaderIdr(hbw, /*dbEna=*/true);
     } else {
       // Fixed QP: ppsBaseQp == qp_ always, so slice_qp_delta is always 0
       // - no live rate control, matching this file's documented scope.
-      writeSliceHeaderP(hbw, frameNum_, qp_, qp_);
+      writeSliceHeaderP(hbw, frameNum_, qp_, qp_, /*dbEna=*/true);
     }
     if (hbw.error()) return 0;
     size_t rawBits = hbw.bitsWritten();
@@ -1194,6 +1300,14 @@ class HwEncoderP4 {
     size_t blen = bitLen >> 3;
     size_t unalignedBlen = blen & 7;
     uint8_t* src = dst + (blen & ~(size_t)7);
+    // Safety net for the AUD padding above: the split point must never
+    // fall before nalStartOffset+4, or the held-back region reaches
+    // into the NAL's own Annex-B start code - see the AUD comment
+    // above for the full mechanism. 9 bytes of P-frame padding covers
+    // this project's current, fixed P-frame header bit length; this
+    // catches it explicitly (rather than silently corrupting output
+    // again) if that ever stops being true.
+    if ((size_t)(src - dst) < nalStartOffset + 4) return 0;
     uint32_t header[3] = {0, 0, 0};
     uint8_t* hdst = reinterpret_cast<uint8_t*>(&header[0]);
     for (size_t i = 0; i < unalignedBlen; i++) hdst[7 - i] = src[i];
@@ -1575,5 +1689,7 @@ class HwEncoderP4 {
 };
 
 }  // namespace tinyh264
+
+#pragma GCC pop_options
 
 #endif  // TINYH264_HW_ENCODER_P4_AVAILABLE

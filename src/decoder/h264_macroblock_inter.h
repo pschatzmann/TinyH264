@@ -32,11 +32,10 @@ namespace tinyh264 {
  * - the caller adds the residual on top afterward (see
  * decodeMacroblockInter()'s residual section).
  */
-template <typename Allocator>
-inline void motionCompensatePartition(MbDecodeContext<Allocator>& ctx, int bx, int by,
+inline void motionCompensatePartition(MbDecodeContext& ctx, int bx, int by,
                                        int pw, int ph, int16_t mvX,
                                        int16_t mvY, int8_t refIdx) {
-  const Frame<Allocator>& ref = *ctx.refList[refIdx];
+  const Frame& ref = *ctx.refList[refIdx];
   int px = ctx.mbX * 16 + bx * 4, py = ctx.mbY * 16 + by * 4;
   int w = pw * 4, h = ph * 4;
   motionCompLuma(ctx.frame->yRow(py) + px, ctx.frame->strideY, ref,
@@ -64,8 +63,7 @@ inline void motionCompensatePartition(MbDecodeContext<Allocator>& ctx, int bx, i
  * unavailable or uses refIdx 0 with a zero MV) and performs full-MB
  * motion compensation with no residual.
  */
-template <typename Allocator>
-inline void decodePSkipMacroblock(MbDecodeContext<Allocator>& ctx, int qpY) {
+inline void decodePSkipMacroblock(MbDecodeContext& ctx, int qpY) {
   MacroblockInfo& mb = ctx.mbInfo->at(ctx.mbX, ctx.mbY);
   mb = MacroblockInfo();
   mb.type = kMbPSkip;
@@ -149,8 +147,7 @@ inline bool decodeRefIdx(BitReader& br, int numActiveRefs, int8_t* outRefIdx) {
  * inside a P slice" case (mb_type >= 5). `*qpY` is the running QP,
  * updated in place; `result` reports unsupported-feature/error status.
  */
-template <typename Allocator>
-inline bool decodeMacroblockInter(BitReader& br, MbDecodeContext<Allocator>& ctx,
+inline bool decodeMacroblockInter(BitReader& br, MbDecodeContext& ctx,
                                    int* qpY, MacroblockDecodeResult* result) {
   *result = MacroblockDecodeResult();
   MacroblockInfo& mb = ctx.mbInfo->at(ctx.mbX, ctx.mbY);

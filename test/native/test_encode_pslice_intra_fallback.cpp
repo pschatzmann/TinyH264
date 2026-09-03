@@ -37,6 +37,8 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include "../../src/MemoryResource.h"
+#include "../../src/StdAllocator.h"
 #include "../../src/TinyH264Decoder.h"
 #include "../../src/TinyH264Encoder.h"
 #include "../../src/encoder/h264_encoder.h"
@@ -68,11 +70,11 @@ int failures = 0;
  * can be compared apples-to-apples against the real encodePFrame() (which
  * makes the real per-macroblock choice) on the same scene-cut input.
  */
-size_t encodePFrameNoFallback(Frame<>& refFrame, MbInfoTable<>& mbInfo,
+size_t encodePFrameNoFallback(Frame& refFrame, MbInfoTable& mbInfo,
                                const uint8_t* srcY, int srcStrideY,
                                const uint8_t* srcU, const uint8_t* srcV,
                                int srcStrideC, int qp, uint8_t* dst,
-                               size_t dstCapacity, Frame<>& outFrame) {
+                               size_t dstCapacity, Frame& outFrame) {
   outFrame.setSize(W, H);
   int mbWidth = W / 16, mbHeight = H / 16;
   mbInfo.reset(mbWidth, mbHeight);
@@ -81,7 +83,7 @@ size_t encodePFrameNoFallback(Frame<>& refFrame, MbInfoTable<>& mbInfo,
   BitWriter sliceW(sliceScratch, sizeof(sliceScratch));
   writeSliceHeaderP(sliceW, 1, qp, qp);
 
-  MbEncodeContext<StdAllocator<uint8_t>> ctx;
+  MbEncodeContext ctx;
   ctx.frame = &outFrame;
   ctx.mbInfo = &mbInfo;
   ctx.chromaQpIndexOffset = 0;
@@ -188,20 +190,21 @@ int main() {
    * Baseline: same scene cut, fallback hardwired off. Encodes its own
    * fresh I-frame (rather than reusing `enc`'s) so its reference frame
    * is captured independently, keeping the two encodes fully separate.
-   * Uses the internal Encoder<> directly (not the TinyH264Encoder public
-   * wrapper) since it exposes frame() - needed to seed
+   * Uses the internal SoftwareEncoder directly (not the TinyH264Encoder
+   * public wrapper) since it exposes frame() - needed to seed
    * encodePFrameNoFallback()'s own reference frame.
    */
-  Encoder<> encBaseline;
+  AllocatorMemoryResource<StdAllocator<uint8_t>> mr;
+  SoftwareEncoder encBaseline(mr);
   std::vector<uint8_t> bsBaseline(200000);
   encBaseline.setSize(W, H);
   encBaseline.setQp(qp);
   size_t nb0 = encBaseline.encodeFrame(srcY0, srcU0, srcV0, bsBaseline.data(),
                                         bsBaseline.size());
-  Frame<> refFrameForBaseline;
+  Frame refFrameForBaseline(mr);
   refFrameForBaseline.copyFrom(encBaseline.frame());
-  Frame<> outFrame;
-  MbInfoTable<> mbInfo;
+  Frame outFrame(mr);
+  MbInfoTable mbInfo(mr);
   size_t nb1 = encodePFrameNoFallback(
       refFrameForBaseline, mbInfo, srcY1, W, srcU1, srcV1, W / 2, qp,
       bsBaseline.data() + nb0, bsBaseline.size() - nb0, outFrame);

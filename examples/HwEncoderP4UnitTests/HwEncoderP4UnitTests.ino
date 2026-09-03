@@ -2,19 +2,21 @@
  * Unit tests for the individual building blocks of
  * src/encoder/h264_hw_encoder_p4.h's ESP32-P4 hardware H.264 encoder
  * driver - NOT an end-to-end encode test (that's
- * examples/EncodeDecodeRoundTrip and TinyH264Encoder::setUseHardware()
- * itself, both of which currently time out waiting for the hardware's
- * own FRAME_DONE interrupt - see that file's own "Validation status"
- * disclaimer and README.md's own honest note on this).
+ * examples/EncodeDecodeRoundTrip and examples/EncodeSyntheticFrame,
+ * which exercise TinyH264Encoder::setUseHardware() against real silicon
+ * and confirm both correctness - PSNR ~48-52dB self-decode - and
+ * performance - ~1037fps at QCIF; see README.md's "ESP32-P4 hardware
+ * encoder" section for the full numbers and the investigation history
+ * that led there).
  *
  * The point of this sketch is different: isolate and check each
  * low-level piece *independently* - clock/reset, individual register
  * write/readback roundtrips, DMA channel reset-and-start in isolation,
- * and the public open()/close() lifecycle - so a real failure (like
- * end-to-end encode() timing out) can be narrowed down to "this specific
- * register write doesn't do what the code assumes" or "this specific
- * DMA channel never asserts reset_avail" instead of just "something in
- * a ~1000-line pipeline is wrong".
+ * and the public open()/close() lifecycle - so a *future* regression
+ * (like end-to-end encode() failing again) can be narrowed down to
+ * "this specific register write doesn't do what the code assumes" or
+ * "this specific DMA channel never asserts reset_avail" instead of just
+ * "something in a ~1000-line pipeline is wrong".
  *
  * This deliberately reaches into `tinyh264::hw_p4_detail` - the header's
  * own internal register/DMA primitives, not the public
@@ -222,132 +224,6 @@ static void testOpenCloseLifecycle() {
   hw.close();
 }
 
-// -- Real one-shot encode, traced via encodeDiagnostic() --
-//
-// Not a pass/fail check like everything above - a real, known-open issue
-// (see README.md's own honest note): encodeDiagnostic() bypasses the
-// interrupt/semaphore path and polls the raw interrupt status register
-// AND the hardware's own internal per-block FSM debug registers
-// (h264GetDebugSnapshot()) directly, so a stall can be told apart from
-// "no interrupt ever reaches the CPU" (nothing here uses interrupts at
-// all) or "the pipeline itself genuinely never starts" (a debug_info0/1
-// field would stay at its idle value the whole time). Found via this
-// exact trace: `top_ctrl_intra_debug_state` (debug_info0 bits [6:4])
-// moves from 0 (idle) to 3 within the first ~50ms and then never changes
-// again for the rest of the window, while every other FSM sub-block
-// (CAVLC, deblocking, ...) stays at its constant idle value throughout -
-// i.e. the intra-prediction control block starts up and stalls very
-// early, before any other stage even begins.
-static const int kDiagWidth = 176;
-static const int kDiagHeight = 144;
-static uint8_t diagY[kDiagWidth * kDiagHeight];
-static uint8_t diagU[(kDiagWidth / 2) * (kDiagHeight / 2)];
-static uint8_t diagV[(kDiagWidth / 2) * (kDiagHeight / 2)];
-static uint8_t diagBitstream[8192];
-
-// OUT channel state register (e.g. H264_DMA_OUT_STATE_CH0_REG, 0x0024):
-// bit24=reset_avail, bits[23:20]=ctrl state (4 bits), bits[19:18]=dscr
-// state, bits[17:0]=dscr addr. IN channel state register (e.g.
-// H264_DMA_IN_STATE_CH4_REG, 0x0924) is laid out one bit lower:
-// bit23=reset_avail, bits[22:20]=ctrl state (3 bits), bits[19:18]=dscr
-// state, bits[17:0]=dscr addr - confirmed field-by-field from the TRM,
-// NOT the same layout as OUT (a real, easy-to-get-wrong mismatch this
-// print helper deliberately accounts for).
-static void printChnState(const char* label, uintptr_t chnBase, bool isOut) {
-  uint32_t s = *hw_p4_detail::dmaChnState(chnBase);
-  int resetAvailBit = isOut ? 24 : 23;
-  uint32_t ctrlStateMask = isOut ? 0xfu : 0x7u;
-  Serial.print(" ");
-  Serial.print(label);
-  Serial.print("_state=0x");
-  Serial.print(s, HEX);
-  Serial.print("(dscr_addr=0x");
-  Serial.print(s & 0x3ffffu, HEX);
-  Serial.print(",dscr_st=");
-  Serial.print((s >> 18) & 3u);
-  Serial.print(",ctrl_st=");
-  Serial.print((s >> 20) & ctrlStateMask);
-  Serial.print(",reset_avail=");
-  Serial.print((s >> resetAvailBit) & 1u);
-  Serial.print(")");
-}
-
-static void onDiagEvent(uint32_t elapsedUs, uint32_t rawStatus,
-                         hw_p4_detail::H264DebugSnapshot snapshot) {
-  Serial.print("  t+");
-  Serial.print(elapsedUs);
-  Serial.print(" us: int_st=0b");
-  for (int b = 3; b >= 0; b--) Serial.print((rawStatus >> b) & 1u);
-  Serial.print(" debug_info0=0x");
-  Serial.print(snapshot.debugInfo0, HEX);
-  Serial.print(" debug_info1=0x");
-  Serial.print(snapshot.debugInfo1, HEX);
-  Serial.print(" sys_status=0x");
-  Serial.print(snapshot.sysStatus, HEX);
-  // TX channel 0 (original picture, tx_pop_ori) and RX channel 4
-  // (bitstream output) real DMA-side state registers - see
-  // H264_DMA_OUT_STATE_CH0_REG/H264_DMA_IN_STATE_CH4_REG in the TRM
-  // (37.9.2): dscr_addr is the DMA's OWN CURRENT outlink/inlink
-  // descriptor address (RO) - if it never becomes our dscYuv_/dscBs_
-  // pointer, the DMA never actually picked up the descriptor we wrote
-  // into OUTLINK_ADDR_CH0/INLINK_ADDR_CH4 at all.
-  printChnState("out_ch0", hw_p4_detail::kOutCh(0), /*isOut=*/true);
-  printChnState("in_ch4", hw_p4_detail::kInCh(4), /*isOut=*/false);
-  Serial.println();
-}
-
-static void testEncodeDiagnosticTrace() {
-  Serial.println("-- One-shot encode, traced (NOT pass/fail - see README's open issue) --");
-  for (int y = 0; y < kDiagHeight; y++) {
-    for (int x = 0; x < kDiagWidth; x++) {
-      diagY[y * kDiagWidth + x] =
-          (uint8_t)(((x + y) * 255) / (kDiagWidth + kDiagHeight));
-    }
-  }
-  for (int i = 0; i < (kDiagWidth / 2) * (kDiagHeight / 2); i++) {
-    diagU[i] = 128;
-    diagV[i] = 128;
-  }
-
-  HwEncoderP4 hw;
-  if (!hw.open(kDiagWidth, kDiagHeight, /*qp=*/26, /*gop=*/0)) {
-    Serial.println("(open() failed - skipping the trace)");
-    return;
-  }
-  {
-    HwEncoderP4::BufferAddresses a = hw.debugBufferAddresses();
-    Serial.print("dscYuv_ (should match out_ch0's dscr_addr low bits) = 0x");
-    Serial.println(a.dscYuv, HEX);
-    Serial.print("dscBs_ (should match in_ch4's dscr_addr low bits) = 0x");
-    Serial.println(a.dscBs, HEX);
-  }
-  size_t n = hw.encodeDiagnostic(diagY, kDiagWidth, diagU, diagV,
-                                  kDiagWidth / 2, diagBitstream,
-                                  sizeof(diagBitstream), onDiagEvent,
-                                  /*timeoutUs=*/500000,
-                                  /*sampleIntervalUs=*/50000);
-  Serial.print("encodeDiagnostic() result: ");
-  Serial.print(n);
-  Serial.println(" bytes (0 == known-open FRAME_DONE-never-arrives issue)");
-
-  // Extra post-mortem probes (temporary, for tracking down the open
-  // FRAME_DONE issue): frame_code_length and the MB-level rate-control
-  // status registers (frame_enc_bits/frame_qp_sum/frame_mad_sum) are all
-  // real, TRM-documented RO status registers that should read nonzero
-  // if ENC_CORE actually processed any macroblocks at all, even if the
-  // FRAME_DONE interrupt itself never fired.
-  Serial.print("post-mortem: frame_code_length=");
-  Serial.print(hw_p4_detail::h264GetCodedLength());
-  Serial.print(" frame_enc_bits=");
-  Serial.print(*hw_p4_detail::reg<uint32_t>(hw_p4_detail::kH264Base, 0xA4) & 0x7ffffffu);
-  Serial.print(" frame_mad_sum=");
-  Serial.print(*hw_p4_detail::reg<uint32_t>(hw_p4_detail::kH264Base, 0xA0) & 0xfffffu);
-  Serial.print(" frame_qp_sum=");
-  Serial.println(*hw_p4_detail::reg<uint32_t>(hw_p4_detail::kH264Base, 0xA8) & 0x3ffffu);
-
-  hw.close();
-}
-
 void setup() {
   Serial.begin(115200);
   delay(2000);
@@ -365,8 +241,6 @@ void setup() {
   testDmaChannelResetInIsolation();
   Serial.println();
   testOpenCloseLifecycle();
-  Serial.println();
-  testEncodeDiagnosticTrace();
 
   Serial.println();
   Serial.print(testsPassed);

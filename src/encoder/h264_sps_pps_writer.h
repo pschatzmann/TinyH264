@@ -73,8 +73,16 @@ inline void writeSpsRbsp(BitWriter& bw, int width, int height,
  * 0 (see writeSliceHeaderIdr()) - i.e. this PPS bakes in a fixed QP for
  * the whole stream rather than exposing per-slice QP adjustment, matching
  * this encoder's current fixed-QP design (no rate control yet).
+ *
+ * `dbEna` (default false, matching this function's original fixed
+ * behavior): when true, sets deblocking_filter_control_present_flag
+ * instead, so a per-slice disable_deblocking_filter_idc/offset triplet
+ * can be written - see writeSliceHeaderIdr()/writeSliceHeaderP()'s own
+ * `dbEna` parameter, which must be passed the same value this was
+ * called with (the PPS flag and the slice header fields it gates must
+ * agree, or a spec-compliant decoder will misparse the slice header).
  */
-inline void writePpsRbsp(BitWriter& bw, int qp) {
+inline void writePpsRbsp(BitWriter& bw, int qp, bool dbEna = false) {
   bw.ue(0);  // pic_parameter_set_id
   bw.ue(0);  // seq_parameter_set_id
   bw.flag(false);  // entropy_coding_mode_flag: CAVLC
@@ -87,7 +95,7 @@ inline void writePpsRbsp(BitWriter& bw, int qp) {
   bw.se(qp - 26);  // pic_init_qp_minus26
   bw.se(0);        // pic_init_qs_minus26
   bw.se(0);        // chroma_qp_index_offset
-  bw.flag(false);  // deblocking_filter_control_present_flag
+  bw.flag(dbEna);  // deblocking_filter_control_present_flag
   bw.flag(false);  // constrained_intra_pred_flag
   bw.flag(false);  // redundant_pic_cnt_present_flag
 
@@ -109,8 +117,13 @@ inline void writePpsRbsp(BitWriter& bw, int qp) {
  * parameter: slice_qp_delta is always written as 0, since
  * writePpsRbsp()'s pic_init_qp_minus26 already carries the whole
  * stream's (fixed, no-rate-control-yet) QP.
+ *
+ * `dbEna` must match the deblocking_filter_control_present_flag the
+ * PPS this slice references was written with (writePpsRbsp()'s own
+ * `dbEna`) - default false, matching this function's original fixed
+ * behavior.
  */
-inline void writeSliceHeaderIdr(BitWriter& bw) {
+inline void writeSliceHeaderIdr(BitWriter& bw, bool dbEna = false) {
   bw.ue(0);  // first_mb_in_slice
   bw.ue(7);  // slice_type = 7 (I, "all slices in picture are I" form -
              /*
@@ -138,11 +151,22 @@ inline void writeSliceHeaderIdr(BitWriter& bw) {
 
   bw.se(0);  // slice_qp_delta: 0 (pic_init_qp_minus26 already == qp - 26)
 
-  /*
-   * deblocking_filter_control_present_flag == 0: no disable_deblocking_
-   * filter_idc / offsets.
-   * num_slice_groups_minus1 == 0: no slice_group_change_cycle.
-   */
+  if (dbEna) {
+    // Matches Espressif's own esp_h264_enc_hw_set_slice(): all three
+    // values fixed at 0 (deblocking_filter_idc=0 => filter applied
+    // normally, no alpha/beta offset) - same *filtering behavior* as
+    // the deblocking_filter_control_present_flag==0 default, just
+    // explicitly signaled instead of implied.
+    bw.se(0);  // disable_deblocking_filter_idc
+    bw.se(0);  // slice_alpha_c0_offset_div2
+    bw.se(0);  // slice_beta_offset_div2
+  } else {
+    /*
+     * deblocking_filter_control_present_flag == 0: no disable_deblocking_
+     * filter_idc / offsets.
+     */
+  }
+  // num_slice_groups_minus1 == 0: no slice_group_change_cycle.
 }
 
 /**
@@ -159,9 +183,12 @@ inline void writeSliceHeaderIdr(BitWriter& bw) {
  * ppsBaseQp` (the QP writePpsRbsp() was originally called with). This
  * is also the mechanism rate control (adjusting QP frame-to-frame)
  * hooks into - see Encoder's qp-tracking members.
+ *
+ * `dbEna`: see writeSliceHeaderIdr()'s own parameter of the same name -
+ * must match the PPS's deblocking_filter_control_present_flag.
  */
 inline void writeSliceHeaderP(BitWriter& bw, int frameNum, int qp,
-                               int ppsBaseQp) {
+                               int ppsBaseQp, bool dbEna = false) {
   bw.ue(0);  // first_mb_in_slice
   bw.ue(5);  // slice_type = 5 (P, "all slices in picture are P" form -
              // same convention as writeSliceHeaderIdr()'s slice_type=7)
@@ -196,11 +223,17 @@ inline void writeSliceHeaderP(BitWriter& bw, int frameNum, int qp,
 
   bw.se(qp - ppsBaseQp);  // slice_qp_delta
 
-  /*
-   * deblocking_filter_control_present_flag == 0: no disable_deblocking_
-   * filter_idc / offsets.
-   * num_slice_groups_minus1 == 0: no slice_group_change_cycle.
-   */
+  if (dbEna) {
+    bw.se(0);  // disable_deblocking_filter_idc
+    bw.se(0);  // slice_alpha_c0_offset_div2
+    bw.se(0);  // slice_beta_offset_div2
+  } else {
+    /*
+     * deblocking_filter_control_present_flag == 0: no disable_deblocking_
+     * filter_idc / offsets.
+     */
+  }
+  // num_slice_groups_minus1 == 0: no slice_group_change_cycle.
 }
 
 }  // namespace tinyh264

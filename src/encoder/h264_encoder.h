@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
-#include "../StdAllocator.h"
+#include "../MemoryResource.h"
 #include "h264_bitwriter.h"
 #include "h264_color_convert.h"
 #include "h264_macroblock_encode.h"
@@ -58,34 +58,37 @@ namespace tinyh264 {
 
 /**
  * Encodes one Baseline-profile CAVLC picture at a time into a real H.264
- * Annex-B stream. Templated on Allocator (default StdAllocator<uint8_t>,
- * see StdAllocator.h) exactly like decoder::Decoder, for the same reason:
- * the two Frame<Allocator> objects this class holds (the closed-loop
- * reconstruction plus the single P-frame reference - see
+ * Annex-B stream. Backed by a MemoryResource (../MemoryResource.h)
+ * passed to the constructor, exactly like decoder::SoftwareDecoder, for
+ * the same reason: the two Frame objects this class holds (the
+ * closed-loop reconstruction plus the single P-frame reference - see
  * h264_macroblock_encode.h's MbEncodeContext doc comment for why an
- * encoder needs one at all) can be placed in PSRAM via a custom allocator
- * on boards that have it. An allocation failure (out of memory) is
- * reported as a 0 return from encodeFrame() (and its color-format
- * overloads) rather than crashing - see StdAllocator.h's file comment
- * for the mechanics.
+ * encoder needs one at all) can be placed in PSRAM via a custom
+ * allocator on boards that have it (see PSRAMAllocatorESP32.h, wrapped
+ * via AllocatorMemoryResource - the mechanism TinyH264Encoder<Allocator>
+ * uses to build the MemoryResource this class actually receives). An
+ * allocation failure (out of memory) is reported as a 0 return from
+ * encodeFrame() (and its color-format overloads) rather than crashing -
+ * see StdAllocator.h's file comment for the mechanics.
  */
-template <typename Allocator = StdAllocator<uint8_t>>
-class Encoder {
+class SoftwareEncoder {
  public:
   /**
-   * Constructs an Encoder, optionally pre-configuring picture width/
-   * height (see setSize()'s own comment) and periodic keyframe interval
-   * (see setKeyframeInterval()'s own comment) in one step instead of
-   * calling both setters separately afterward - convenient when they're
-   * already known at construction time (e.g. a fixed-resolution camera
-   * feed). All three default to 0 (width/height unconfigured, no
-   * periodic keyframe), matching a default-constructed Encoder's
-   * previous behavior exactly - `Encoder<> enc;` still compiles and
-   * behaves the same as before this constructor existed. setSize() (or
-   * this constructor's `width`/`height`) must establish a real size
-   * before the first encodeFrame() call, or it returns 0.
+   * Constructs a SoftwareEncoder backed by `memRes` (propagated to every
+   * Frame/Buffer/MbInfoTable member this class holds), optionally
+   * pre-configuring picture width/height (see setSize()'s own comment)
+   * and periodic keyframe interval (see setKeyframeInterval()'s own
+   * comment) in one step instead of calling both setters separately
+   * afterward - convenient when they're already known at construction
+   * time (e.g. a fixed-resolution camera feed). `width`/`height` default
+   * to 0 (unconfigured); setSize() (or this constructor's `width`/
+   * `height`) must establish a real size before the first encodeFrame()
+   * call, or it returns 0.
    */
-  Encoder(int width = 0, int height = 0, int keyframeInterval = 0) {
+  SoftwareEncoder(MemoryResource& memRes, int width = 0, int height = 0,
+                   int keyframeInterval = 0)
+      : frame_(memRes), mbInfo_(memRes), yuvY_(memRes), yuvU_(memRes),
+        yuvV_(memRes), refFrame_(memRes) {
     setSize(width, height);
     setKeyframeInterval(keyframeInterval);
   }
@@ -403,7 +406,7 @@ class Encoder {
    * for measuring this encoder's own quality (e.g. PSNR against the
    * source) without needing a separate decode pass.
    */
-  const Frame<Allocator>& frame() const { return frame_; }
+  const Frame& frame() const { return frame_; }
 
   /**
    * Reserves this encoder's picture buffers (frame_ and refFrame_, each
@@ -548,7 +551,7 @@ class Encoder {
     BitWriter sliceW(sliceScratch_, sizeof(sliceScratch_));
     writeSliceHeaderIdr(sliceW);
 
-    MbEncodeContext<Allocator> ctx;
+    MbEncodeContext ctx;
     ctx.frame = &frame_;
     ctx.mbInfo = &mbInfo_;
     ctx.chromaQpIndexOffset = 0;  // matches writePpsRbsp()'s fixed choice
@@ -663,7 +666,7 @@ class Encoder {
     BitWriter sliceW(sliceScratch_, sizeof(sliceScratch_));
     writeSliceHeaderP(sliceW, frameNum_, qp, ppsBaseQp_);
 
-    MbEncodeContext<Allocator> ctx;
+    MbEncodeContext ctx;
     ctx.frame = &frame_;
     ctx.mbInfo = &mbInfo_;
     ctx.chromaQpIndexOffset = 0;
@@ -1037,10 +1040,10 @@ class Encoder {
    * callers who only ever use the plain YUV-planes encodeFrame()
    * shouldn't unconditionally pay ~38KB of static RAM for conversion
    * buffers they never touch. Same one-time-allocate-then-reuse idiom as
-   * Frame::ensureAllocated() (h264_frame.h): a `Buffer<uint8_t, Allocator>`
+   * Frame::ensureAllocated() (h264_frame.h): a `Buffer<uint8_t>`
    * allocated once, not a per-call allocation in the hot path, and using
-   * the same Allocator template parameter so it can be placed in PSRAM
-   * alongside frame_ on boards that have it.
+   * the same MemoryResource so it can be placed in PSRAM alongside
+   * frame_ on boards that have it.
    */
   bool prepareYuvScratch(int width, int height) {
     if (width <= 0 || height <= 0 || (width % 16) != 0 ||
@@ -1133,12 +1136,12 @@ class Encoder {
     if (adaptiveQp_ > 51) adaptiveQp_ = 51;
   }
 
-  Frame<Allocator> frame_;
-  MbInfoTable<Allocator> mbInfo_;
+  Frame frame_;
+  MbInfoTable mbInfo_;
   uint8_t sliceScratch_[H264_MAX_NAL_SIZE];
-  Buffer<uint8_t, Allocator> yuvY_;
-  Buffer<uint8_t, Allocator> yuvU_;
-  Buffer<uint8_t, Allocator> yuvV_;
+  Buffer<uint8_t> yuvY_;
+  Buffer<uint8_t> yuvU_;
+  Buffer<uint8_t> yuvV_;
 
   /*
    * P-frame state: the single reference picture (this milestone's only
@@ -1149,7 +1152,7 @@ class Encoder {
    * dimensions of its own), and the QP writePpsRbsp() was originally
    * called with (writeSliceHeaderP() needs it to compute slice_qp_delta).
    */
-  Frame<Allocator> refFrame_;
+  Frame refFrame_;
   bool haveReference_ = false;
   int frameNum_ = 0;
   int width_ = 0, height_ = 0;

@@ -3,14 +3,15 @@
  * described in src/StdAllocator.h's file comment - an out-of-memory
  * condition must surface as TinyH264Decoder::Status::kAllocationError /
  * TinyH264Encoder::encodeFrame() returning 0, not crash the process - see
- * common/h264_frame.h's Buffer<Allocator> and decoder/h264_decoder.h's
+ * common/h264_buffer.h's Buffer<T> and decoder/h264_decoder.h's
  * DecodeStatus::kAllocationError for the mechanics. This is the one test
  * in the suite that plugs in a custom (non-default, non-PSRAM) Allocator,
  * specifically to make an allocation fail on demand - covering both
- * Frame<Allocator>'s picture buffers and MbInfoTable<Allocator>'s
- * per-macroblock metadata (common/h264_mb_info.h), since both are now
- * templated on the same caller-supplied Allocator (so a PSRAM allocator
- * moves both off internal SRAM together, not just the picture buffers).
+ * Frame's picture buffers and MbInfoTable's per-macroblock metadata
+ * (common/h264_mb_info.h), since both are backed by the same
+ * MemoryResource, itself built from TinyH264Decoder/TinyH264Encoder's
+ * own Allocator template argument (so a PSRAM allocator moves both off
+ * internal SRAM together, not just the picture buffers).
  */
 #include <cstdio>
 #include <cstdlib>

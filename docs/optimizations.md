@@ -219,7 +219,7 @@ sensor in, never to code inside this library.
 **Net**: parked, not ruled out. No P4 hardware available to validate
 against yet. If picked up: scope as a separate, opt-in P4-only encoder
 path (new class/backend, built from the vendored `hw` driver) rather
-than touching the existing portable `Encoder<Allocator>` - PPA would be
+than touching the existing portable `SoftwareEncoder` - PPA would be
 the more natural first piece to adopt, since it accelerates existing
 code rather than replacing it.
 

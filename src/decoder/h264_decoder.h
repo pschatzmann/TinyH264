@@ -1,7 +1,8 @@
 #pragma once
 #include <stdint.h>
+#include <array>
 #include <utility>
-#include "../StdAllocator.h"
+#include "../MemoryResource.h"
 #include "h264_config.h"
 #include "h264_deblock.h"
 #include "../common/h264_frame.h"
@@ -24,13 +25,14 @@
  * unsupported by parseSliceHeader() (h264_slice_header.h) rather than
  * implemented.
  *
- * Templated on Allocator (default StdAllocator<uint8_t>, see
- * StdAllocator.h, propagated from TinyH264Decoder<Allocator>) purely
- * because it owns curFrame_ plus an array of reference Frame<Allocator>
- * pictures; see h264_frame.h for why the frame buffers are
- * allocator-parameterized in the first place. An allocation failure (out
- * of memory) is reported as DecodeStatus::kAllocationError rather than
- * crashing - see StdAllocator.h's file comment for the mechanics.
+ * Nothing here is templated - SoftwareDecoder holds plain Frame/
+ * MbInfoTable members, both non-templated types backed by a
+ * MemoryResource chosen at construction (see ../MemoryResource.h) rather
+ * than a compile-time Allocator parameter. TinyH264Decoder<Allocator>
+ * (see TinyH264Decoder.h) builds an AllocatorMemoryResource<Allocator>
+ * from its own Allocator template argument and passes it in here. An
+ * allocation failure (out of memory) is reported as
+ * DecodeStatus::kAllocationError rather than crashing.
  */
 
 namespace tinyh264 {
@@ -53,10 +55,14 @@ enum class DecodeStatus {
  * should use that instead of this class directly, unless they want to
  * drive NAL-by-NAL decoding themselves without the callback wrapper.
  */
-template <typename Allocator = StdAllocator<uint8_t>>
-class Decoder {
+class SoftwareDecoder {
  public:
-  Decoder() : nalReader_(nalScratch_, sizeof(nalScratch_)) {}
+  explicit SoftwareDecoder(MemoryResource& memRes)
+      : nalReader_(nalScratch_, sizeof(nalScratch_)),
+        mbInfo_(memRes),
+        curFrame_(memRes),
+        refFrames_(makeFrameArray(memRes,
+                                   std::make_index_sequence<H264_MAX_REF_FRAMES>{})) {}
 
   /**
    * Sets the runtime-active maximum number of stored reference pictures,
@@ -176,7 +182,7 @@ class Decoder {
    * The most recently completed picture (valid after next() returns
    * DecodeStatus::kOk).
    */
-  const Frame<Allocator>& frame() const { return curFrame_; }
+  const Frame& frame() const { return curFrame_; }
 
   /**
    * The SPS in effect for the most recently decoded picture's slices
@@ -316,7 +322,7 @@ class Decoder {
     int totalMbs = mbWidth * mbHeight;
     int qpY = sh.sliceQp;
 
-    MbDecodeContext<Allocator> ctx;
+    MbDecodeContext ctx;
     ctx.frame = &curFrame_;
     if (sh.sliceType == kSliceP) {
       /*
@@ -379,7 +385,7 @@ class Decoder {
          * shifting older entries back; if already at the runtime cap,
          * the oldest (last) entry is evicted first. The shift is done
          * with std::swap rather than Frame::copyFrom() - Frame's
-         * y/u/v members are Buffer<Allocator>, so swapping is an O(1)
+         * y/u/v members are Buffer<uint8_t>, so swapping is an O(1)
          * pointer exchange, not a ~38KB+ memcpy; only the actual new
          * entry (refFrames_[0] <- curFrame_) needs a real copy, exactly
          * one per stored reference picture regardless of maxRefFrames_.
@@ -417,11 +423,27 @@ class Decoder {
    * the whole picture (potentially spanning several slices with
    * different parameters) has been decoded and needs per-MB values.
    */
-  static void tagDeblockParams(MbDecodeContext<Allocator>& ctx, const SliceHeader& sh) {
+  static void tagDeblockParams(MbDecodeContext& ctx, const SliceHeader& sh) {
     MacroblockInfo& mb = ctx.mbInfo->at(ctx.mbX, ctx.mbY);
     mb.disableDeblockIdc = (uint8_t)sh.disableDeblockingFilterIdc;
     mb.alphaC0OffsetDiv2 = (int8_t)sh.sliceAlphaC0OffsetDiv2;
     mb.betaOffsetDiv2 = (int8_t)sh.sliceBetaOffsetDiv2;
+  }
+
+  /**
+   * Builds refFrames_: an array of H264_MAX_REF_FRAMES Frame objects, all
+   * sharing the same MemoryResource, none of them default-constructible
+   * (Frame requires a MemoryResource& at construction) - the
+   * index_sequence pack expansion is the standard idiom for
+   * "construct N identical, non-default-constructible elements" without
+   * hardcoding N at the call site. Relies on C++17 guaranteed copy
+   * elision to materialize the returned std::array directly into
+   * refFrames_, no move/copy of the Frame elements involved.
+   */
+  template <size_t... Is>
+  static std::array<Frame, sizeof...(Is)> makeFrameArray(
+      MemoryResource& memRes, std::index_sequence<Is...>) {
+    return {{((void)Is, Frame(memRes))...}};
   }
 
   uint8_t nalScratch_[H264_MAX_NAL_SIZE]; ///< emulation-prevention-stripped scratch for the current NAL
@@ -433,13 +455,13 @@ class Decoder {
   bool haveSps_ = false, havePps_ = false; ///< true once at least one SPS/PPS has been parsed
   bool inputExhausted_ = false; ///< mirrors inputExhausted()
 
-  MbInfoTable<Allocator> mbInfo_;  ///< per-picture macroblock metadata (see h264_mb_info.h)
-  Frame<Allocator> curFrame_;  ///< picture currently being reconstructed
+  MbInfoTable mbInfo_;  ///< per-picture macroblock metadata (see h264_mb_info.h)
+  Frame curFrame_;  ///< picture currently being reconstructed
   /**
    * Stored reference pictures, index 0 = most recently decoded (clause
    * 8.2.5.3 sliding window) - see decodeSlice()'s picture-complete block.
    */
-  Frame<Allocator> refFrames_[H264_MAX_REF_FRAMES];
+  std::array<Frame, H264_MAX_REF_FRAMES> refFrames_;
   int refFrameCount_ = 0;  ///< how many of refFrames_[] are currently valid (0..maxRefFrames_)
   int maxRefFrames_ = H264_MAX_REF_FRAMES;  ///< runtime-active cap, see setMaxRefFrames()
   int sliceCount_ = 0;         ///< slices seen so far in the current picture, doubles as the next sliceId

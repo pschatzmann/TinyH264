@@ -1,6 +1,7 @@
 #pragma once
 #include <cstring>
 
+#include "MemoryResource.h"
 #include "StdAllocator.h"
 #include "common/h264_buffer.h"
 #include "encoder/h264_color_convert.h"
@@ -57,8 +58,11 @@
 // StdAllocator.h) is used for the picture buffers this class holds
 // internally (its own closed-loop reconstruction plus the single P-frame
 // reference - see encoder/h264_macroblock_encode.h's MbEncodeContext doc
-// comment for why an encoder needs one at all) - exactly the same
-// PSRAM-placement mechanism TinyH264Decoder offers:
+// comment for why an encoder needs one at all). TinyH264Encoder itself
+// stays templated on Allocator for a stable public API, but internally
+// builds an AllocatorMemoryResource<Allocator> (see MemoryResource.h)
+// and hands that down to the non-templated SoftwareEncoder it wraps -
+// exactly the same PSRAM-placement mechanism TinyH264Decoder offers:
 //   TinyH264Encoder<PSRAMAllocatorESP32<uint8_t>> encoder;
 // An out-of-memory allocation failure surfaces as a 0 return from
 // encodeFrame() (and its color-format overloads) or from begin(),
@@ -70,7 +74,7 @@
 namespace tinyh264 {
 
 /**
- * Public-facing encoder API: wraps the internal Encoder<Allocator> (see
+ * Public-facing encoder API: wraps the internal SoftwareEncoder (see
  * encoder/h264_encoder.h) behind encodeFrame() and its color-format
  * siblings, which take raw pixel data and produce a complete Annex-B
  * bitstream, without the caller needing to know anything about NAL
@@ -85,14 +89,19 @@ class TinyH264Encoder {
    * Constructs a TinyH264Encoder, optionally pre-configuring picture
    * width/height and periodic keyframe interval in one step instead of
    * calling setSize()/setKeyframeInterval() separately afterward - see
-   * Encoder's own constructor comment (encoder/h264_encoder.h). All
-   * three default to 0 (unconfigured/no periodic keyframe), matching a
-   * default-constructed TinyH264Encoder's previous behavior exactly -
+   * SoftwareEncoder's own constructor comment (encoder/h264_encoder.h).
+   * All three default to 0 (unconfigured/no periodic keyframe), matching
+   * a default-constructed TinyH264Encoder's previous behavior exactly -
    * `TinyH264Encoder<> encoder;` still compiles and behaves the same as
    * before this constructor existed.
    */
   TinyH264Encoder(int width = 0, int height = 0, int keyframeInterval = 0)
-      : encoder_(width, height, keyframeInterval) {
+      : encoder_(memRes_, width, height, keyframeInterval)
+#ifdef TINYH264_HW_ENCODER_P4_AVAILABLE
+        ,
+        hwScratch_(memRes_)
+#endif
+  {
     width_ = width;
     height_ = height;
     keyframeInterval_ = keyframeInterval;
@@ -156,6 +165,14 @@ class TinyH264Encoder {
     if (enable && !hardwareAvailable()) return false;
     if (useHardware_ != enable) hwConfigDirty_ = true;
     useHardware_ = enable;
+    // An explicit enable is a deliberate request to try hardware again -
+    // give it a fresh chance even if a previous attempt (this session's
+    // default-on behavior, or an earlier explicit enable) already set
+    // hwEncodeFailed_. Without this, encodeHwPlanar()/encodeHwScratch()'s
+    // own hwEncodeFailed_ short-circuit (checked *before*
+    // ensureHardwareReady(), which is otherwise the only place that
+    // clears it) would keep it permanently stuck failed.
+    if (enable) hwEncodeFailed_ = false;
     return true;
   }
 
@@ -187,11 +204,14 @@ class TinyH264Encoder {
    */
   size_t encodeFrame(const uint8_t* srcY, const uint8_t* srcU,
                       const uint8_t* srcV, uint8_t* dst, size_t dstCapacity) {
-    if (useHardware_) {
+    if (useHardware_ && !hwEncodeFailed_) {
       int strideY = strideY_ > 0 ? strideY_ : width_;
       int strideC = strideC_ > 0 ? strideC_ : width_ / 2;
-      return encodeHwPlanar(srcY, strideY, srcU, srcV, strideC, dst,
-                             dstCapacity);
+      size_t n = encodeHwPlanar(srcY, strideY, srcU, srcV, strideC, dst,
+                                 dstCapacity);
+      if (n > 0) return n;
+      // Hardware failed - fall through to the software encoder rather
+      // than returning 0.
     }
     return encoder_.encodeFrame(srcY, srcU, srcV, dst, dstCapacity);
   }
@@ -207,12 +227,16 @@ class TinyH264Encoder {
    */
   size_t encodeFrameRgb888(const uint8_t* rgb, uint8_t* dst,
                             size_t dstCapacity) {
-    if (useHardware_) {
+    if (useHardware_ && !hwEncodeFailed_) {
       int stride = packedStride_ > 0 ? packedStride_ : width_ * 3;
-      if (!prepareHwScratch()) return 0;
-      convertRgb888ToYuv420(rgb, stride, width_, height_, hwScratchY(),
-                             width_, hwScratchU(), hwScratchV(), width_ / 2);
-      return encodeHwScratch(dst, dstCapacity);
+      if (prepareHwScratch()) {
+        convertRgb888ToYuv420(rgb, stride, width_, height_, hwScratchY(),
+                               width_, hwScratchU(), hwScratchV(), width_ / 2);
+        size_t n = encodeHwScratch(dst, dstCapacity);
+        if (n > 0) return n;
+      }
+      // Hardware failed (or scratch allocation failed) - fall through
+      // to the software encoder rather than returning 0.
     }
     return encoder_.encodeFrameRgb888(rgb, dst, dstCapacity);
   }
@@ -225,12 +249,16 @@ class TinyH264Encoder {
    */
   size_t encodeFrameRgb666(const uint8_t* rgb666, uint8_t* dst,
                             size_t dstCapacity) {
-    if (useHardware_) {
+    if (useHardware_ && !hwEncodeFailed_) {
       int stride = packedStride_ > 0 ? packedStride_ : width_ * 3;
-      if (!prepareHwScratch()) return 0;
-      convertRgb666ToYuv420(rgb666, stride, width_, height_, hwScratchY(),
-                             width_, hwScratchU(), hwScratchV(), width_ / 2);
-      return encodeHwScratch(dst, dstCapacity);
+      if (prepareHwScratch()) {
+        convertRgb666ToYuv420(rgb666, stride, width_, height_, hwScratchY(),
+                               width_, hwScratchU(), hwScratchV(), width_ / 2);
+        size_t n = encodeHwScratch(dst, dstCapacity);
+        if (n > 0) return n;
+      }
+      // Hardware failed (or scratch allocation failed) - fall through
+      // to the software encoder rather than returning 0.
     }
     return encoder_.encodeFrameRgb666(rgb666, dst, dstCapacity);
   }
@@ -243,12 +271,16 @@ class TinyH264Encoder {
    */
   size_t encodeFrameRgb565(const uint16_t* rgb565, uint8_t* dst,
                             size_t dstCapacity) {
-    if (useHardware_) {
+    if (useHardware_ && !hwEncodeFailed_) {
       int stride = packedStride_ > 0 ? packedStride_ : width_;
-      if (!prepareHwScratch()) return 0;
-      convertRgb565ToYuv420(rgb565, stride, width_, height_, hwScratchY(),
-                             width_, hwScratchU(), hwScratchV(), width_ / 2);
-      return encodeHwScratch(dst, dstCapacity);
+      if (prepareHwScratch()) {
+        convertRgb565ToYuv420(rgb565, stride, width_, height_, hwScratchY(),
+                               width_, hwScratchU(), hwScratchV(), width_ / 2);
+        size_t n = encodeHwScratch(dst, dstCapacity);
+        if (n > 0) return n;
+      }
+      // Hardware failed (or scratch allocation failed) - fall through
+      // to the software encoder rather than returning 0.
     }
     return encoder_.encodeFrameRgb565(rgb565, dst, dstCapacity);
   }
@@ -261,12 +293,16 @@ class TinyH264Encoder {
    */
   size_t encodeFrameYuv422(const uint8_t* yuyv, uint8_t* dst,
                             size_t dstCapacity) {
-    if (useHardware_) {
+    if (useHardware_ && !hwEncodeFailed_) {
       int stride = packedStride_ > 0 ? packedStride_ : width_ * 2;
-      if (!prepareHwScratch()) return 0;
-      convertYuyv422ToYuv420(yuyv, stride, width_, height_, hwScratchY(),
-                              width_, hwScratchU(), hwScratchV(), width_ / 2);
-      return encodeHwScratch(dst, dstCapacity);
+      if (prepareHwScratch()) {
+        convertYuyv422ToYuv420(yuyv, stride, width_, height_, hwScratchY(),
+                                width_, hwScratchU(), hwScratchV(), width_ / 2);
+        size_t n = encodeHwScratch(dst, dstCapacity);
+        if (n > 0) return n;
+      }
+      // Hardware failed (or scratch allocation failed) - fall through
+      // to the software encoder rather than returning 0.
     }
     return encoder_.encodeFrameYuv422(yuyv, dst, dstCapacity);
   }
@@ -304,7 +340,10 @@ class TinyH264Encoder {
    */
   void setKeyframeInterval(int frames) {
     encoder_.setKeyframeInterval(frames);
-    if (keyframeInterval_ != frames) hwConfigDirty_ = true;
+    if (keyframeInterval_ != frames) {
+      hwConfigDirty_ = true;
+      hwEncodeFailed_ = false;
+    }
     keyframeInterval_ = frames;
   }
 
@@ -317,7 +356,10 @@ class TinyH264Encoder {
    */
   void setSize(int width, int height) {
     encoder_.setSize(width, height);
-    if (width != width_ || height != height_) hwConfigDirty_ = true;
+    if (width != width_ || height != height_) {
+      hwConfigDirty_ = true;
+      hwEncodeFailed_ = false;
+    }
     width_ = width;
     height_ = height;
   }
@@ -354,7 +396,10 @@ class TinyH264Encoder {
    */
   void setQp(int qp) {
     encoder_.setQp(qp);
-    if (qp_ != qp) hwConfigDirty_ = true;
+    if (qp_ != qp) {
+      hwConfigDirty_ = true;
+      hwEncodeFailed_ = false;
+    }
     qp_ = qp;
   }
 
@@ -458,6 +503,7 @@ class TinyH264Encoder {
     hw_.close();
     hwScratch_.release();
     hwConfigDirty_ = true;
+    hwEncodeFailed_ = false;
 #endif
   }
 
@@ -477,10 +523,14 @@ class TinyH264Encoder {
   int strideUV() const { return encoder_.frame().strideC; }
 
  private:
-  Encoder<Allocator> encoder_;
+  // Declared before encoder_ (and hwScratch_, below): members initialize
+  // in declaration order, and both of those need memRes_ already
+  // constructed to build from.
+  AllocatorMemoryResource<Allocator> memRes_;
+  SoftwareEncoder encoder_;
 
   // Cached copies of setSize()/setStride()/setPackedStride()/setQp()/
-  // setKeyframeInterval() - encoder_ (Encoder<Allocator>) has no getters
+  // setKeyframeInterval() - encoder_ (SoftwareEncoder) has no getters
   // for its own equivalents, and the hardware path needs to read them
   // back to (re)open HwEncoderP4 with matching configuration.
   int width_ = 0;
@@ -490,7 +540,7 @@ class TinyH264Encoder {
   int packedStride_ = 0;
   int qp_ = -1;
   int keyframeInterval_ = 0;
-  bool useHardware_ = false;
+  bool useHardware_ = hardwareAvailable();
   // True whenever open()-affecting configuration (size, qp, keyframe
   // interval) changed since the hardware encoder was last opened -
   // checked by ensureHardwareReady() to decide whether to reopen.
@@ -499,10 +549,29 @@ class TinyH264Encoder {
   // harmless dead state on a build where the hardware path itself isn't
   // available.
   bool hwConfigDirty_ = true;
+  // Set the first time a real hw_.encode() call fails (as opposed to
+  // ensureHardwareReady() itself failing to open) - see
+  // encodeHwScratch()/encodeHwPlanar(). Once set, those two short-
+  // circuit to 0 immediately (checked *before* ensureHardwareReady(),
+  // so a stuck-failed hardware path never even attempts to reopen) -
+  // instead of paying hw_.encode()'s up-to-1-second timeout on every
+  // subsequent frame - and the public encodeFrame()-family methods
+  // (see each one's own "fall through to the software encoder" line)
+  // fall back to the software encoder instead of returning 0 to the
+  // caller. Because ensureHardwareReady() is unreachable once this is
+  // set, every setter that can plausibly change hardware's behavior
+  // (setUseHardware(true), setSize(), setQp(), setKeyframeInterval(),
+  // end()) clears it directly itself, alongside its own
+  // hwConfigDirty_ = true - not relying on ensureHardwareReady() to do
+  // it - so a genuine reconfiguration (which might behave differently)
+  // gets its own fresh chance rather than staying permanently opted
+  // out. Also cleared inside ensureHardwareReady() itself on a
+  // successful (re)open, for the same reason.
+  bool hwEncodeFailed_ = false;
 
 #ifdef TINYH264_HW_ENCODER_P4_AVAILABLE
   HwEncoderP4 hw_;
-  Buffer<uint8_t, Allocator> hwScratch_;
+  Buffer<uint8_t> hwScratch_;
 
   bool ensureHardwareReady() {
     if (width_ <= 0 || height_ <= 0 || qp_ < 0) return false;
@@ -510,8 +579,14 @@ class TinyH264Encoder {
         !hwConfigDirty_) {
       return true;
     }
-    if (!hw_.open(width_, height_, qp_, keyframeInterval_)) return false;
+    if (!hw_.open(width_, height_, qp_, keyframeInterval_)) {
+      Serial.println("TinyH264Encoder: failed to open hardware encoder");
+      return false;
+    }
+    Serial.printf("TinyH264Encoder: opened hardware encoder %dx%d, qp=%d, keyframeInterval=%d\n",
+                  width_, height_, qp_, keyframeInterval_);
     hwConfigDirty_ = false;
+    hwEncodeFailed_ = false;
     return true;
   }
 
@@ -539,9 +614,15 @@ class TinyH264Encoder {
   // encoder - shared tail end of encodeFrameRgb888()/Rgb666()/Rgb565()/
   // Yuv422()'s hardware path.
   size_t encodeHwScratch(uint8_t* dst, size_t dstCapacity) {
+    if (hwEncodeFailed_) return 0;
     if (!ensureHardwareReady()) return 0;
-    return hw_.encode(hwScratchY(), width_, hwScratchU(), hwScratchV(),
-                       width_ / 2, dst, dstCapacity);
+    size_t n = hw_.encode(hwScratchY(), width_, hwScratchU(), hwScratchV(),
+                          width_ / 2, dst, dstCapacity);
+    if (n == 0) {
+      Serial.println("TinyH264Encoder: hardware encode failed - falling back to the software encoder from now on");
+      hwEncodeFailed_ = true;
+    }
+    return n;
   }
 
   // Encodes separate Y/U/V planes (encodeFrame()'s own source shape)
@@ -552,8 +633,14 @@ class TinyH264Encoder {
   size_t encodeHwPlanar(const uint8_t* srcY, int strideY, const uint8_t* srcU,
                         const uint8_t* srcV, int strideC, uint8_t* dst,
                         size_t dstCapacity) {
+    if (hwEncodeFailed_) return 0;
     if (!ensureHardwareReady()) return 0;
-    return hw_.encode(srcY, strideY, srcU, srcV, strideC, dst, dstCapacity);
+    size_t n = hw_.encode(srcY, strideY, srcU, srcV, strideC, dst, dstCapacity);
+    if (n == 0) {
+      Serial.println("TinyH264Encoder: hardware encode failed - falling back to the software encoder from now on");
+      hwEncodeFailed_ = true;
+    }
+    return n;
   }
 #else
   // Unreachable stubs (useHardware_ can never be true without

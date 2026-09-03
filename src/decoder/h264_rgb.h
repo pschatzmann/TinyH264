@@ -163,8 +163,7 @@ inline void convertYuv420ToRgb888(const uint8_t* yPlane, int strideY,
  * Convenience overload taking a decoded Frame directly (see
  * TinyH264Decoder::toRGB565() for the public-API wrapper) - whole frame.
  */
-template <typename Allocator>
-inline void convertFrameToRgb565(const Frame<Allocator>& frame, uint16_t* dst) {
+inline void convertFrameToRgb565(const Frame& frame, uint16_t* dst) {
   convertYuv420ToRgb565(frame.y(), frame.strideY, frame.u(),
                          frame.v(), frame.strideC, frame.width,
                          frame.height, dst);
@@ -175,8 +174,7 @@ inline void convertFrameToRgb565(const Frame<Allocator>& frame, uint16_t* dst) {
  * (see TinyH264Decoder::toRGB565() for the public-API wrapper, and the
  * width/height overload above for the origin/alignment constraints).
  */
-template <typename Allocator>
-inline void convertFrameToRgb565(const Frame<Allocator>& frame, int originX,
+inline void convertFrameToRgb565(const Frame& frame, int originX,
                                   int originY, int width, int height,
                                   uint16_t* dst) {
   convertYuv420ToRgb565(frame.y(), frame.strideY, frame.u(),
@@ -200,8 +198,7 @@ inline void convertFrameToRgb565(const Frame<Allocator>& frame, int originX,
  * change for callers who never touch setScaleFactor(). `dst` must have
  * room for width*height uint16_t entries; never allocates.
  */
-template <typename Allocator>
-inline void convertFrameToRgb565(const Frame<Allocator>& frame,
+inline void convertFrameToRgb565(const Frame& frame,
                                   int scaledWidth, int scaledHeight, int x,
                                   int y, int width, int height,
                                   uint16_t* dst) {
@@ -235,8 +232,7 @@ inline void convertFrameToRgb565(const Frame<Allocator>& frame,
  * scaledHeight output picture. `dst` must have room for
  * scaledWidth*scaledHeight uint16_t entries.
  */
-template <typename Allocator>
-inline void convertFrameToRgb565(const Frame<Allocator>& frame,
+inline void convertFrameToRgb565(const Frame& frame,
                                   int scaledWidth, int scaledHeight,
                                   uint16_t* dst) {
   convertFrameToRgb565(frame, scaledWidth, scaledHeight, 0, 0, scaledWidth,
@@ -247,8 +243,7 @@ inline void convertFrameToRgb565(const Frame<Allocator>& frame,
  * Convenience overload taking a decoded Frame directly (see
  * TinyH264Decoder::toRGB666()) - whole frame.
  */
-template <typename Allocator>
-inline void convertFrameToRgb666(const Frame<Allocator>& frame, uint8_t* dst) {
+inline void convertFrameToRgb666(const Frame& frame, uint8_t* dst) {
   convertYuv420ToRgb666(frame.y(), frame.strideY, frame.u(),
                          frame.v(), frame.strideC, frame.width,
                          frame.height, dst);
@@ -258,8 +253,7 @@ inline void convertFrameToRgb666(const Frame<Allocator>& frame, uint8_t* dst) {
  * Convenience overload taking a decoded Frame directly - a sub-rectangle
  * (see TinyH264Decoder::toRGB666()).
  */
-template <typename Allocator>
-inline void convertFrameToRgb666(const Frame<Allocator>& frame, int originX,
+inline void convertFrameToRgb666(const Frame& frame, int originX,
                                   int originY, int width, int height,
                                   uint8_t* dst) {
   convertYuv420ToRgb666(frame.y(), frame.strideY, frame.u(),
@@ -275,8 +269,7 @@ inline void convertFrameToRgb666(const Frame<Allocator>& frame, int originX,
  * native picture). `dst` must have room for width*height*3 uint8_t
  * entries.
  */
-template <typename Allocator>
-inline void convertFrameToRgb666(const Frame<Allocator>& frame,
+inline void convertFrameToRgb666(const Frame& frame,
                                   int scaledWidth, int scaledHeight, int x,
                                   int y, int width, int height,
                                   uint8_t* dst) {
@@ -311,8 +304,7 @@ inline void convertFrameToRgb666(const Frame<Allocator>& frame,
  * convertFrameToRgb666() above - `dst` must have room for
  * scaledWidth*scaledHeight*3 uint8_t entries.
  */
-template <typename Allocator>
-inline void convertFrameToRgb666(const Frame<Allocator>& frame,
+inline void convertFrameToRgb666(const Frame& frame,
                                   int scaledWidth, int scaledHeight,
                                   uint8_t* dst) {
   convertFrameToRgb666(frame, scaledWidth, scaledHeight, 0, 0, scaledWidth,
@@ -323,8 +315,7 @@ inline void convertFrameToRgb666(const Frame<Allocator>& frame,
  * Convenience overload taking a decoded Frame directly (see
  * TinyH264Decoder::toRGB888()) - whole frame.
  */
-template <typename Allocator>
-inline void convertFrameToRgb888(const Frame<Allocator>& frame, uint8_t* dst) {
+inline void convertFrameToRgb888(const Frame& frame, uint8_t* dst) {
   convertYuv420ToRgb888(frame.y(), frame.strideY, frame.u(),
                          frame.v(), frame.strideC, frame.width,
                          frame.height, dst);
@@ -334,8 +325,7 @@ inline void convertFrameToRgb888(const Frame<Allocator>& frame, uint8_t* dst) {
  * Convenience overload taking a decoded Frame directly - a sub-rectangle
  * (see TinyH264Decoder::toRGB888()).
  */
-template <typename Allocator>
-inline void convertFrameToRgb888(const Frame<Allocator>& frame, int originX,
+inline void convertFrameToRgb888(const Frame& frame, int originX,
                                   int originY, int width, int height,
                                   uint8_t* dst) {
   convertYuv420ToRgb888(frame.y(), frame.strideY, frame.u(),
@@ -351,8 +341,7 @@ inline void convertFrameToRgb888(const Frame<Allocator>& frame, int originX,
  * native picture). `dst` must have room for width*height*3 uint8_t
  * entries.
  */
-template <typename Allocator>
-inline void convertFrameToRgb888(const Frame<Allocator>& frame,
+inline void convertFrameToRgb888(const Frame& frame,
                                   int scaledWidth, int scaledHeight, int x,
                                   int y, int width, int height,
                                   uint8_t* dst) {
@@ -383,8 +372,7 @@ inline void convertFrameToRgb888(const Frame<Allocator>& frame,
  * convertFrameToRgb888() above - `dst` must have room for
  * scaledWidth*scaledHeight*3 uint8_t entries.
  */
-template <typename Allocator>
-inline void convertFrameToRgb888(const Frame<Allocator>& frame,
+inline void convertFrameToRgb888(const Frame& frame,
                                   int scaledWidth, int scaledHeight,
                                   uint8_t* dst) {
   convertFrameToRgb888(frame, scaledWidth, scaledHeight, 0, 0, scaledWidth,

@@ -54,9 +54,8 @@ namespace tinyh264 {
  * times per macroblock; QCIF encode measured 1.8s/P-frame on real
  * ESP32/RP2040 hardware before this fix), not a behavior change.
  */
-template <typename Allocator>
-inline int sad16x16At(const MbEncodeContext<Allocator>& ctx,
-                       const Frame<Allocator>& ref, int dx, int dy) {
+inline int sad16x16At(const MbEncodeContext& ctx,
+                       const Frame& ref, int dx, int dy) {
   int px = ctx.mbX * 16, py = ctx.mbY * 16;
   int sad = 0;
   int rx = px + dx, ry = py + dy;
@@ -105,9 +104,8 @@ inline int sad16x16At(const MbEncodeContext<Allocator>& ctx,
  * MV, so this trades encode speed for compression efficiency on
  * fast-moving content, not correctness.
  */
-template <typename Allocator>
-inline int motionSearch16x16(const MbEncodeContext<Allocator>& ctx,
-                              const Frame<Allocator>& ref, int16_t* outMv,
+inline int motionSearch16x16(const MbEncodeContext& ctx,
+                              const Frame& ref, int16_t* outMv,
                               int range = 8) {
   int bestSad = sad16x16At(ctx, ref, 0, 0);
   int bestDx = 0, bestDy = 0;
@@ -169,9 +167,8 @@ enum class MotionSearchAlgorithm { Exhaustive, Fast };
  * this into an unbounded loop; real content converges in a handful of
  * iterations, well under that cap.
  */
-template <typename Allocator>
-inline int motionSearch16x16Fast(const MbEncodeContext<Allocator>& ctx,
-                                  const Frame<Allocator>& ref, int16_t* outMv,
+inline int motionSearch16x16Fast(const MbEncodeContext& ctx,
+                                  const Frame& ref, int16_t* outMv,
                                   int range = 8) {
   static const int kLdspDx[8] = {0, 0, -1, 1, -1, 1, -2, 2};
   static const int kLdspDy[8] = {-2, 2, -1, -1, 1, 1, 0, 0};
@@ -274,9 +271,8 @@ inline bool shouldUseIntraInPSlice(int intraSad, int interSad) {
  * chroma bilinear path still runs for real) reconstructs bit-identically
  * to what decoding this bitstream back would give.
  */
-template <typename Allocator>
-inline void motionCompensate16x16(MbEncodeContext<Allocator>& ctx,
-                                   const Frame<Allocator>& ref, int16_t mvX,
+inline void motionCompensate16x16(MbEncodeContext& ctx,
+                                   const Frame& ref, int16_t mvX,
                                    int16_t mvY) {
   int px = ctx.mbX * 16, py = ctx.mbY * 16;
   motionCompLuma(ctx.frame->yRow(py) + px, ctx.frame->strideY, ref, px, py,
@@ -304,8 +300,7 @@ inline void motionCompensate16x16(MbEncodeContext<Allocator>& ctx,
  * shared as-is, since it's already mode-independent (pure quantized-
  * coefficient bitstream writing + reconstruction).
  */
-template <typename Allocator>
-inline void quantizeChromaInter(MbEncodeContext<Allocator>& ctx,
+inline void quantizeChromaInter(MbEncodeContext& ctx,
                                  MacroblockInfo& mb, int targetQp,
                                  int32_t chromaBlocks[2][4][16],
                                  int32_t chromaDcGrid[2][4]) {
@@ -358,9 +353,8 @@ inline void quantizeChromaInter(MbEncodeContext<Allocator>& ctx,
  * effect (needed by whichever caller runs next either way: real residual
  * reconstruction if non-zero, or the skip's own final state if zero).
  */
-template <typename Allocator>
-inline bool computeInterResidual(MbEncodeContext<Allocator>& ctx,
-                                  const Frame<Allocator>& ref, int16_t mvX,
+inline bool computeInterResidual(MbEncodeContext& ctx,
+                                  const Frame& ref, int16_t mvX,
                                   int16_t mvY, int targetQp, MacroblockInfo& mb,
                                   int32_t lumaBlocks[16][16],
                                   int32_t chromaBlocks[2][4][16],
@@ -405,9 +399,8 @@ inline bool computeInterResidual(MbEncodeContext<Allocator>& ctx,
  * it can reuse the computed residual via finishInterMacroblock() rather
  * than recomputing it from scratch when the answer turns out to be "no".
  */
-template <typename Allocator>
-inline bool wouldHaveZeroResidual(MbEncodeContext<Allocator>& ctx,
-                                   const Frame<Allocator>& ref, int16_t mvX,
+inline bool wouldHaveZeroResidual(MbEncodeContext& ctx,
+                                   const Frame& ref, int16_t mvX,
                                    int16_t mvY, int qp) {
   MacroblockInfo throwawayMb;
   int32_t throwawayLuma[16][16];
@@ -433,8 +426,7 @@ inline bool wouldHaveZeroResidual(MbEncodeContext<Allocator>& ctx,
  * mb_qp_delta gating note below - same "only coded if there's residual"
  * rule as I_4x4, not I_16x16's unconditional one).
  */
-template <typename Allocator>
-inline int finishInterMacroblock(BitWriter& bw, MbEncodeContext<Allocator>& ctx,
+inline int finishInterMacroblock(BitWriter& bw, MbEncodeContext& ctx,
                                   const MacroblockInfo& computedMb,
                                   int32_t lumaBlocks[16][16],
                                   int32_t chromaBlocks[2][4][16],
@@ -522,10 +514,9 @@ inline int finishInterMacroblock(BitWriter& bw, MbEncodeContext<Allocator>& ctx,
  * wouldHaveZeroResidual()'s skip check. Returns the running QP after this
  * macroblock.
  */
-template <typename Allocator>
 inline int encodeMacroblockInter16x16(BitWriter& bw,
-                                       MbEncodeContext<Allocator>& ctx,
-                                       const Frame<Allocator>& ref,
+                                       MbEncodeContext& ctx,
+                                       const Frame& ref,
                                        int16_t mvX, int16_t mvY, int qpPrev,
                                        int targetQp) {
   MacroblockInfo mb;
@@ -545,8 +536,7 @@ inline int encodeMacroblockInter16x16(BitWriter& bw,
  * out so the encoder can check "does my motion-estimated best MV match
  * what skip would give for free" without duplicating the zero-mv rule.
  */
-template <typename Allocator>
-inline void skipMv(const MbEncodeContext<Allocator>& ctx, int16_t* outMv) {
+inline void skipMv(const MbEncodeContext& ctx, int16_t* outMv) {
   MvNeighbor a = mvNeighborAt(ctx, -1, 0);
   MvNeighbor b = mvNeighborAt(ctx, 0, -1);
   bool zeroMv =
@@ -569,9 +559,8 @@ inline void skipMv(const MbEncodeContext<Allocator>& ctx, int16_t* outMv) {
  * state for future neighbor lookups, mirroring decodePSkipMacroblock()
  * exactly (always refIdx 0, no residual).
  */
-template <typename Allocator>
-inline void encodeMacroblockPSkip(MbEncodeContext<Allocator>& ctx,
-                                   const Frame<Allocator>& ref, int qp) {
+inline void encodeMacroblockPSkip(MbEncodeContext& ctx,
+                                   const Frame& ref, int qp) {
   MacroblockInfo& mb = ctx.mbInfo->at(ctx.mbX, ctx.mbY);
   mb = MacroblockInfo();
   mb.type = kMbPSkip;
