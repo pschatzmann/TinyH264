@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+#include "../../src/common/MemoryResource.h"
+#include "../../src/StdAllocator.h"
 #include "../../src/decoder/h264_decoder.h"
 
 using namespace tinyh264;
@@ -28,7 +30,7 @@ static std::vector<uint8_t> readFile(const char* path) {
   return buf;
 }
 
-static int compareFrame(int frameIdx, const Frame<>& f, const uint8_t* ref) {
+static int compareFrame(int frameIdx, const Frame& f, const uint8_t* ref) {
   const uint8_t* refY = ref;
   const uint8_t* refU = refY + 176 * 144;
   const uint8_t* refV = refU + 88 * 72;
@@ -81,7 +83,8 @@ int main() {
   auto stream = readFile("assets/qcif_test.264");
   auto ref = readFile("assets/all_frames_ref.yuv");
 
-  Decoder<> decoder;
+  AllocatorMemoryResource<StdAllocator<uint8_t>> mr;
+  SoftwareDecoder decoder(mr);
   decoder.setInput(stream.data(), stream.size());
 
   int frameIdx = 0;

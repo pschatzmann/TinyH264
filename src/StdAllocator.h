@@ -7,8 +7,9 @@
  * minimal C++ Allocator (std::vector/std::allocator-compatible) that
  * behaves like std::allocator<T> except for one deliberate difference:
  * allocate() never throws. It returns nullptr on failure instead, the
- * contract common/h264_frame.h's Buffer<Allocator> relies on to turn an
- * out-of-memory condition into DecodeStatus::kAllocationError /
+ * contract common/h264_buffer.h's Buffer<T> (via MemoryResource, see
+ * MemoryResource.h) relies on to turn an out-of-memory condition into
+ * DecodeStatus::kAllocationError /
  * TinyH264Decoder::Status::kAllocationError (and the encoder's analogous
  * "return 0" convention) instead of a crash.
  *
@@ -21,11 +22,11 @@
  * calls std::terminate()/abort() immediately, regardless of any try/catch
  * further up the call stack; (2) even with exceptions enabled, nothing in
  * this codebase used to catch that exception, so it propagated all the
- * way out of Decoder<Allocator>/Encoder<Allocator>/TinyH264Decoder<Allocator>/
- * TinyH264Encoder<Allocator> uncaught - still a crash (std::terminate),
- * just via a different mechanism. Making the default allocator itself
- * never throw means Buffer<Allocator>'s plain null-pointer check (see
- * h264_frame.h) is sufficient to catch an allocation failure on every
+ * way out of TinyH264Decoder<Allocator>/TinyH264Encoder<Allocator>
+ * uncaught - still a crash (std::terminate), just via a different
+ * mechanism. Making the default allocator itself never throw means
+ * Buffer<T>'s plain null-pointer check (see h264_buffer.h) is sufficient
+ * to catch an allocation failure on every
  * toolchain, exceptions enabled or not - and a caller sees
  * DecodeStatus::kAllocationError / Status::kAllocationError / a 0 return
  * from encodeFrame(), instead of the process going down.

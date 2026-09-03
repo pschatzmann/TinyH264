@@ -3,6 +3,7 @@
 #ifdef TINYH264_DEBUG_MB
 #include <stdio.h>
 #endif
+#include "../common/Logger.h"
 #include "h264_bitreader.h"
 #include "h264_cavlc.h"
 #include "../common/h264_frame.h"
@@ -22,10 +23,10 @@
  * h264_macroblock_inter.h, which shares the Intra decode path here for
  * the Intra-macroblock-inside-a-P-slice case.
  *
- * Everything here is templated on Allocator (the same parameter
- * TinyH264Decoder<Allocator> and Frame<Allocator> use) purely because it
- * all takes an MbDecodeContext<Allocator>, which holds Frame<Allocator>
- * pointers.
+ * Nothing here is templated - MbDecodeContext holds plain Frame/
+ * MbInfoTable pointers, both non-templated types backed by a
+ * MemoryResource chosen at construction (see ../MemoryResource.h) rather
+ * than a compile-time Allocator parameter.
  */
 
 namespace tinyh264 {
@@ -48,9 +49,8 @@ struct MacroblockDecodeResult {
 /// in this file and h264_macroblock_inter.h so they don't each need a long,
 /// repeated parameter list. `mbX`/`mbY` are updated by the caller (Decoder::
 /// decodeSlice()) before each macroblock.
-template <typename Allocator>
 struct MbDecodeContext {
-  Frame<Allocator>* frame;
+  Frame* frame;
   /*
    * RefPicList0 for the current slice (clause 8.2.4): refList[0] is the
    * most recently decoded reference picture, refList[numActiveRefs-1] the
@@ -60,9 +60,9 @@ struct MbDecodeContext {
    * window into Decoder::refFrames_. Unused (numActiveRefs == 0) for
    * I-slices.
    */
-  const Frame<Allocator>* refList[H264_MAX_REF_FRAMES] = {nullptr};
+  const Frame* refList[H264_MAX_REF_FRAMES] = {nullptr};
   int numActiveRefs = 0;
-  MbInfoTable<Allocator>* mbInfo;
+  MbInfoTable* mbInfo;
   const Sps* sps;
   const Pps* pps;
   int sliceId;
@@ -74,8 +74,7 @@ struct MbDecodeContext {
  * Inter case - clause 8.5.9 dequant then 8.5.12.2 inverse transform) and
  * adds it to the already-predicted pixels at the block's position.
  */
-template <typename Allocator>
-inline bool decodeLumaBlockFull(BitReader& br, MbDecodeContext<Allocator>& ctx,
+inline bool decodeLumaBlockFull(BitReader& br, MbDecodeContext& ctx,
                                  int blkIdx, int qp) {
   int bx = kBlk4x4X[blkIdx], by = kBlk4x4Y[blkIdx];
   int nA = lumaNeighborNnz(ctx, bx, by, -1, 0);
@@ -84,7 +83,11 @@ inline bool decodeLumaBlockFull(BitReader& br, MbDecodeContext<Allocator>& ctx,
 
   int32_t coeff[16];
   uint32_t totalCoeff = 0;
-  if (!residualBlockCavlc(br, nC, 16, coeff, &totalCoeff)) return false;
+  if (!residualBlockCavlc(br, nC, 16, coeff, &totalCoeff)) {
+    H264LOG.error("decodeLumaBlockFull: CAVLC residual decode failed at mb(%d,%d) blk=%d",
+                   ctx.mbX, ctx.mbY, blkIdx);
+    return false;
+  }
   ctx.mbInfo->at(ctx.mbX, ctx.mbY).nnz[blkIdx] = (uint8_t)totalCoeff;
 #ifdef TINYH264_DEBUG_MB
   if (ctx.mbY >= 6) {
@@ -112,8 +115,7 @@ inline bool decodeLumaBlockFull(BitReader& br, MbDecodeContext<Allocator>& ctx,
  * clause 8.5.6) and adds it, using the given already Hadamard-transformed
  * and dequantized DC value at raster position 0.
  */
-template <typename Allocator>
-inline bool decodeLumaBlockAc(BitReader& br, MbDecodeContext<Allocator>& ctx,
+inline bool decodeLumaBlockAc(BitReader& br, MbDecodeContext& ctx,
                                int blkIdx, int qp, int32_t dcValue) {
   int bx = kBlk4x4X[blkIdx], by = kBlk4x4Y[blkIdx];
   int nA = lumaNeighborNnz(ctx, bx, by, -1, 0);
@@ -122,7 +124,11 @@ inline bool decodeLumaBlockAc(BitReader& br, MbDecodeContext<Allocator>& ctx,
 
   int32_t coeff[15];
   uint32_t totalCoeff = 0;
-  if (!residualBlockCavlc(br, nC, 15, coeff, &totalCoeff)) return false;
+  if (!residualBlockCavlc(br, nC, 15, coeff, &totalCoeff)) {
+    H264LOG.error("decodeLumaBlockAc: CAVLC residual decode failed at mb(%d,%d) blk=%d",
+                   ctx.mbX, ctx.mbY, blkIdx);
+    return false;
+  }
   ctx.mbInfo->at(ctx.mbX, ctx.mbY).nnz[blkIdx] = (uint8_t)totalCoeff;
 
   int32_t block[16] = {0};
@@ -142,8 +148,7 @@ inline bool decodeLumaBlockAc(BitReader& br, MbDecodeContext<Allocator>& ctx,
  * transformed and dequantized chroma DC value at raster position 0
  * (clause 8.5.11), and adds it on top of the already-predicted samples.
  */
-template <typename Allocator>
-inline bool decodeChromaBlockAc(BitReader& br, MbDecodeContext<Allocator>& ctx,
+inline bool decodeChromaBlockAc(BitReader& br, MbDecodeContext& ctx,
                                  int plane, int cx, int cy, int chromaQp,
                                  int32_t dcValue) {
   int nA = chromaNeighborNnz(ctx, plane, cx, cy, -1, 0);
@@ -152,7 +157,11 @@ inline bool decodeChromaBlockAc(BitReader& br, MbDecodeContext<Allocator>& ctx,
 
   int32_t coeff[15];
   uint32_t totalCoeff = 0;
-  if (!residualBlockCavlc(br, nC, 15, coeff, &totalCoeff)) return false;
+  if (!residualBlockCavlc(br, nC, 15, coeff, &totalCoeff)) {
+    H264LOG.error("decodeChromaBlockAc: CAVLC residual decode failed at mb(%d,%d) plane=%d cx=%d cy=%d",
+                   ctx.mbX, ctx.mbY, plane, cx, cy);
+    return false;
+  }
   ctx.mbInfo->at(ctx.mbX, ctx.mbY).nnz[16 + plane * 4 + cy * 2 + cx] =
       (uint8_t)totalCoeff;
 
@@ -200,8 +209,7 @@ inline bool decodeChromaBlockAc(BitReader& br, MbDecodeContext<Allocator>& ctx,
  * PPS transform_8x8_mode, an out-of-range mb_type, etc.) - an actual
  * bitstream error is instead signaled by a `false` return.
  */
-template <typename Allocator>
-inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocator>& ctx,
+inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext& ctx,
                                            uint32_t mbTypeRaw, int* qpY,
                                            MacroblockDecodeResult* result) {
   *result = MacroblockDecodeResult();
@@ -236,13 +244,19 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocat
     for (int i = 0; i < 24; i++) mb.nnz[i] = 16;
     mb.qpY = 0;
     *qpY = 0;
-    if (br.error()) return false;
+    if (br.error()) {
+      H264LOG.error("decodeMacroblockIntraWithType: I_PCM raw-sample read truncated at mb(%d,%d)",
+                     ctx.mbX, ctx.mbY);
+      return false;
+    }
     result->ok = true;
     return true;
   }
 
   bool is16x16 = mbTypeRaw >= 1 && mbTypeRaw <= 24;
   if (mbTypeRaw > 25) {
+    H264LOG.error("decodeMacroblockIntraWithType: mb_type=%u out of range at mb(%d,%d)",
+                   mbTypeRaw, ctx.mbX, ctx.mbY);
     result->unsupported = true;  // not a valid I-slice mb_type
     return true;
   }
@@ -255,6 +269,8 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocat
      * unsupported rather than silently mis-decoding 8x8-transform data.
      */
     if (ctx.pps->transform8x8ModeFlag) {
+      H264LOG.warn("decodeMacroblockIntraWithType: I_NxN + 8x8 transform not supported at mb(%d,%d)",
+                    ctx.mbX, ctx.mbY);
       result->unsupported = true;
       return true;
     }
@@ -294,7 +310,11 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocat
 
   if (!is16x16) {
     uint32_t cbpCode = br.ue();
-    if (cbpCode > 47) return false;
+    if (cbpCode > 47) {
+      H264LOG.error("decodeMacroblockIntraWithType: invalid coded_block_pattern %u at mb(%d,%d)",
+                     cbpCode, ctx.mbX, ctx.mbY);
+      return false;
+    }
     uint8_t cbpCombined = kCbpIntra4x4[cbpCode];
     mb.cbpLuma = cbpCombined & 0xF;
     mb.cbpChroma = cbpCombined >> 4;
@@ -323,7 +343,11 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocat
   }
 #endif
 
-  if (br.error()) return false;
+  if (br.error()) {
+    H264LOG.error("decodeMacroblockIntraWithType: bitstream error reading mb_qp_delta at mb(%d,%d)",
+                   ctx.mbX, ctx.mbY);
+    return false;
+  }
 
   // --- Luma residual ---------------------------------------------------
   if (is16x16) {
@@ -335,8 +359,11 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocat
     int nCdc = predictNc(bxA, bxB);
     int32_t dcCoeff[16];
     uint32_t dcTotalCoeff = 0;
-    if (!residualBlockCavlc(br, nCdc, 16, dcCoeff, &dcTotalCoeff))
+    if (!residualBlockCavlc(br, nCdc, 16, dcCoeff, &dcTotalCoeff)) {
+      H264LOG.error("decodeMacroblockIntraWithType: CAVLC I_16x16 luma DC decode failed at mb(%d,%d)",
+                     ctx.mbX, ctx.mbY);
       return false;
+    }
     int32_t dcBlock[16] = {0};
     for (int k = 0; k < 16; k++) dcBlock[kZigZag4x4[k]] = dcCoeff[k];
     hadamard4x4(dcBlock);
@@ -385,7 +412,11 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocat
     for (int plane = 0; plane < 2; plane++) {
       int32_t coeff[4];
       uint32_t totalCoeff = 0;
-      if (!residualBlockCavlc(br, -1, 4, coeff, &totalCoeff)) return false;
+      if (!residualBlockCavlc(br, -1, 4, coeff, &totalCoeff)) {
+        H264LOG.error("decodeMacroblockIntraWithType: CAVLC chroma DC decode failed at mb(%d,%d) plane=%d",
+                       ctx.mbX, ctx.mbY, plane);
+        return false;
+      }
       int32_t* dst = plane == 0 ? cbDc : crDc;
       dst[0] = coeff[0];
       dst[1] = coeff[1];
@@ -425,7 +456,11 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocat
     }
   }
 
-  if (br.error()) return false;
+  if (br.error()) {
+    H264LOG.error("decodeMacroblockIntraWithType: bitstream error at end of macroblock at mb(%d,%d)",
+                   ctx.mbX, ctx.mbY);
+    return false;
+  }
   result->ok = true;
   return true;
 }
@@ -437,11 +472,12 @@ inline bool decodeMacroblockIntraWithType(BitReader& br, MbDecodeContext<Allocat
  * branch instead), then defers to decodeMacroblockIntraWithType() for
  * everything else.
  */
-template <typename Allocator>
-inline bool decodeMacroblockIntra(BitReader& br, MbDecodeContext<Allocator>& ctx,
+inline bool decodeMacroblockIntra(BitReader& br, MbDecodeContext& ctx,
                                    int* qpY, MacroblockDecodeResult* result) {
   uint32_t mbTypeRaw = br.ue();
   if (mbTypeRaw > 25 || br.error()) {
+    H264LOG.error("decodeMacroblockIntra: invalid/truncated mb_type at mb(%d,%d)",
+                   ctx.mbX, ctx.mbY);
     *result = MacroblockDecodeResult();
     result->unsupported = true;
     return true;

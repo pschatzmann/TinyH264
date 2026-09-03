@@ -5,8 +5,8 @@
  * TinyH264Decoder.h/TinyH264Encoder.h) - see h264_decoder.h/
  * h264_encoder.h for the full design rationale.
  *
- * Uses the internal Decoder<>/Encoder<> classes directly (not the
- * TinyH264*<> wrappers), the same pattern test_lifecycle.cpp uses, to
+ * Uses the internal SoftwareDecoder/SoftwareEncoder classes directly (not
+ * the TinyH264*<> wrappers), the same pattern test_lifecycle.cpp uses, to
  * inspect frame().dataY.size() and confirm the *actual* allocated buffer
  * size tracks the runtime-configured ceiling, not just the compile-time
  * H264_MAX_WIDTH/H264_MAX_HEIGHT default.
@@ -34,6 +34,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+#include "../../src/common/MemoryResource.h"
+#include "../../src/StdAllocator.h"
 #include "../../src/decoder/h264_decoder.h"
 #include "../../src/encoder/h264_encoder.h"
 
@@ -68,7 +70,8 @@ int failures = 0;
 int main() {
   // --- 1. Default: unchanged from the compile-time H264_MAX_WIDTH/HEIGHT ---
   {
-    Decoder<> dec;
+    AllocatorMemoryResource<StdAllocator<uint8_t>> mr;
+    SoftwareDecoder dec(mr);
     CHECK(dec.maxWidth() == H264_MAX_WIDTH, "default maxWidth() != H264_MAX_WIDTH");
     CHECK(dec.maxHeight() == H264_MAX_HEIGHT, "default maxHeight() != H264_MAX_HEIGHT");
 
@@ -94,7 +97,8 @@ int main() {
 
   // --- 2. Shrinking: real QCIF stream still decodes at a smaller ceiling ---
   {
-    Decoder<> dec;
+    AllocatorMemoryResource<StdAllocator<uint8_t>> mr;
+    SoftwareDecoder dec(mr);
     dec.setMaxDimension(176, 144);
     CHECK(dec.maxWidth() == 176 && dec.maxHeight() == 144,
           "setMaxDimension(176,144) not reflected in maxWidth()/maxHeight()");
@@ -121,7 +125,8 @@ int main() {
 
   // --- 3. Growing: accepted, reflected in the actual allocation ---
   {
-    Decoder<> dec;
+    AllocatorMemoryResource<StdAllocator<uint8_t>> mr;
+    SoftwareDecoder dec(mr);
     dec.setMaxDimension(640, 480);
     CHECK(dec.maxWidth() == 640 && dec.maxHeight() == 480,
           "setMaxDimension(640,480) not reflected in maxWidth()/maxHeight()");
@@ -132,7 +137,8 @@ int main() {
 
   // --- 4. A stream exceeding the (shrunk) runtime ceiling is rejected ---
   {
-    Decoder<> dec;
+    AllocatorMemoryResource<StdAllocator<uint8_t>> mr;
+    SoftwareDecoder dec(mr);
     dec.setMaxDimension(160, 128);  // smaller than the real 176x144 stream
     auto stream = readFile("assets/multiref.264");
     dec.setInput(stream.data(), stream.size());
@@ -143,7 +149,8 @@ int main() {
 
   // --- 5. Encoder side: shrink/grow the allocation, reject an oversized encode ---
   {
-    Encoder<> enc;
+    AllocatorMemoryResource<StdAllocator<uint8_t>> mr;
+    SoftwareEncoder enc(mr);
     enc.setMaxDimension(176, 144);
     CHECK(enc.maxWidth() == 176 && enc.maxHeight() == 144,
           "Encoder::setMaxDimension(176,144) not reflected");
@@ -160,7 +167,8 @@ int main() {
                                 dst.data(), dst.size());
     CHECK(n == 0, "encodeFrame() accepted 320x240 against a 176x144 ceiling");
 
-    Encoder<> enc2;
+    AllocatorMemoryResource<StdAllocator<uint8_t>> mr2;
+    SoftwareEncoder enc2(mr2);
     enc2.setMaxDimension(640, 480);
     enc2.setSize(320, 240);
     enc2.setQp(26);

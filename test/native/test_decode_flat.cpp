@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+#include "../../src/common/MemoryResource.h"
+#include "../../src/StdAllocator.h"
 #include "../../src/decoder/h264_decoder.h"
 
 using namespace tinyh264;
@@ -66,7 +68,8 @@ int main() {
   auto stream = readFile("assets/flat_test.264");
   auto ref = readFile("assets/flat_frame0_ref.yuv");
 
-  Decoder<> decoder;
+  AllocatorMemoryResource<StdAllocator<uint8_t>> mr;
+  SoftwareDecoder decoder(mr);
   decoder.setInput(stream.data(), stream.size());
 
   DecodeStatus status;
@@ -86,7 +89,7 @@ int main() {
 
   printf("decoded first picture after %d NAL(s)\n", nalCount);
 
-  const Frame<>& f = decoder.frame();
+  const Frame& f = decoder.frame();
   printf("frame: %dx%d stride=%d/%d\n", f.width, f.height, f.strideY,
          f.strideC);
   assert(f.width == 176 && f.height == 144);

@@ -1,7 +1,6 @@
 #pragma once
 #include <stdint.h>
-#include <memory>
-#include "../StdAllocator.h"
+#include "MemoryResource.h"
 #include "h264_buffer.h"
 #include "h264_config.h"
 #include "h264_tables.h"
@@ -108,23 +107,26 @@ struct MacroblockInfo {
  * an actual arduino-cli link failure, not just budget math, the same
  * way the original Frame overflow was found.
  *
- * Templated on Allocator (default StdAllocator<uint8_t>, see
- * ../StdAllocator.h), propagated from Decoder<Allocator>/
- * Encoder<Allocator> exactly like Frame<Allocator> - so a PSRAM
- * allocator (PSRAMAllocatorESP32<uint8_t>) moves this table's ~38.7KB
- * (at the QVGA default - see docs/memory-budget.md) off internal SRAM
- * along with the picture buffers, instead of always competing with the
- * rest of the sketch for it. sliceId_/mb_ need `int16_t`/`MacroblockInfo`
- * allocators respectively, not `Allocator` itself (which is conventionally
- * an allocator of `uint8_t`, matching Frame's own Y/U/V planes) -
- * std::allocator_traits<Allocator>::rebind_alloc<T> derives those,
- * the same rebinding mechanism std::vector uses internally (and the
- * reason StdAllocator/PSRAMAllocatorESP32 both provide the rebinding
- * constructor their own file comments describe).
+ * Backed by a MemoryResource (../MemoryResource.h) passed to the
+ * constructor - built from SoftwareDecoder's/SoftwareEncoder's own
+ * Allocator template argument via AllocatorMemoryResource, default
+ * StdAllocator<uint8_t> (see ../StdAllocator.h) - exactly like Frame's
+ * own Y/U/V planes, so a PSRAM allocator (PSRAMAllocatorESP32<uint8_t>)
+ * moves this table's ~38.7KB (at the QVGA default - see
+ * docs/memory-budget.md) off internal SRAM along with the picture
+ * buffers, instead of always competing with the rest of the sketch for
+ * it. Unlike the old Allocator-template-parameter design, sliceId_
+ * (Buffer<int16_t>) and mb_ (Buffer<MacroblockInfo>) both draw from the
+ * exact same MemoryResource directly - a byte-oriented allocator has no
+ * per-element-type rebinding to do in the first place.
  */
-template <typename Allocator = StdAllocator<uint8_t>>
 class MbInfoTable {
  public:
+  /// Constructs an MbInfoTable whose backing storage will draw from
+  /// `memRes` once allocated (see reset()).
+  explicit MbInfoTable(MemoryResource& memRes)
+      : sliceId_(memRes), mb_(memRes) {}
+
   /**
    * Overrides the allocation ceiling (in pixels, not macroblocks -
    * converted internally the same way H264_MAX_MBS itself is derived
@@ -254,13 +256,10 @@ class MbInfoTable {
   }
 
  private:
-  using SliceIdAllocator = typename std::allocator_traits<Allocator>::template rebind_alloc<int16_t>;
-  using MbAllocator = typename std::allocator_traits<Allocator>::template rebind_alloc<MacroblockInfo>;
-
   int mbWidth_ = 0, mbHeight_ = 0;
   int maxMbs_ = H264_MAX_MBS;
-  Buffer<int16_t, SliceIdAllocator> sliceId_;
-  Buffer<MacroblockInfo, MbAllocator> mb_;
+  Buffer<int16_t> sliceId_;
+  Buffer<MacroblockInfo> mb_;
 };
 
 /**

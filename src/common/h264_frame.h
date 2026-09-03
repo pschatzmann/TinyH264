@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <string.h>
-#include "../StdAllocator.h"
+#include "MemoryResource.h"
 #include "h264_buffer.h"
 #include "h264_config.h"
 
@@ -13,7 +13,7 @@
  * Decoder/Encoder instance via setMaxDimension(), see h264_decoder.h/
  * h264_encoder.h).
  *
- * Y, U, and V live in *three separate* Buffer<uint8_t, Allocator> buffers
+ * Y, U, and V live in *three separate* Buffer<uint8_t> buffers
  * (h264_buffer.h) rather than one merged contiguous allocation. A merged buffer
  * was tried first (one allocator call per Frame, whole picture DMA/bulk-
  * copy friendly), but at larger resolutions (e.g. QVGA, 115200 bytes for
@@ -33,12 +33,13 @@
  * anything else in the sketch even gets a chance to run - confirmed by
  * actually compiling the example against esp32:esp32 with arduino-cli,
  * not just by the theoretical budget math in h264_config.h. The
- * Allocator template parameter (propagated from
- * TinyH264Decoder<Allocator>, default StdAllocator<uint8_t> - see
- * StdAllocator.h) lets callers point these buffers at PSRAM or a custom
- * pool instead of the default heap, without touching decoder internals.
- * Sizing happens once at startup, never per-frame, so this doesn't
- * reintroduce allocation into the decode hot path.
+ * MemoryResource (../MemoryResource.h) passed to the constructor - built
+ * from TinyH264Decoder<Allocator>'s own Allocator template argument,
+ * default StdAllocator<uint8_t>, see StdAllocator.h - lets callers point
+ * these buffers at PSRAM or a custom pool instead of the default heap,
+ * without touching decoder internals. Sizing happens once at startup,
+ * never per-frame, so this doesn't reintroduce allocation into the
+ * decode hot path.
  */
 
 namespace tinyh264 {
@@ -46,15 +47,21 @@ namespace tinyh264 {
 /**
  * A single YUV 4:2:0 planar decoded picture (ITU-T H.264 clause 6.2:
  * "Source, decoded, and output pictures"), MB-aligned to
- * coded_width x coded_height. A Decoder<Allocator> keeps several of
- * these resident: the picture currently being reconstructed, plus up to
- * H264_MAX_REF_FRAMES stored reference pictures. The Allocator template
- * parameter controls where the backing storage lives (regular heap by
- * default via StdAllocator, see StdAllocator.h; see PSRAMAllocatorESP32.h
- * to place it in PSRAM instead).
+ * coded_width x coded_height. A SoftwareDecoder keeps several of these
+ * resident: the picture currently being reconstructed, plus up to
+ * H264_MAX_REF_FRAMES stored reference pictures. The MemoryResource
+ * passed to the constructor controls where the backing storage lives
+ * (regular heap by default via StdAllocator, see StdAllocator.h,
+ * wrapped in AllocatorMemoryResource - see ../MemoryResource.h; see
+ * PSRAMAllocatorESP32.h to place it in PSRAM instead).
  */
-template <typename Allocator = StdAllocator<uint8_t>>
 struct Frame {
+  /// Constructs a Frame whose backing buffers will draw from `memRes`
+  /// once allocated (see ensureAllocated()) - propagated to every Y/U/V
+  /// Buffer member.
+  explicit Frame(MemoryResource& memRes)
+      : dataY(memRes), dataU(memRes), dataV(memRes) {}
+
   /**
    * Allocation ceiling this Frame's buffers are sized to, in luma
    * samples - defaults to the compile-time H264_MAX_WIDTH/
@@ -88,9 +95,9 @@ struct Frame {
    * header comment above). Prefer y()/u()/v() (or yRow()/uRow()/vRow())
    * over indexing these directly.
    */
-  Buffer<uint8_t, Allocator> dataY;
-  Buffer<uint8_t, Allocator> dataU;
-  Buffer<uint8_t, Allocator> dataV;
+  Buffer<uint8_t> dataY;
+  Buffer<uint8_t> dataU;
+  Buffer<uint8_t> dataV;
 
   int width = 0;   ///< coded (MB-aligned) luma width in samples
   int height = 0;  ///< coded (MB-aligned) luma height in samples
@@ -227,8 +234,7 @@ struct Frame {
  * strideY == width, which setSize() always establishes in this library -
  * there's no row padding to skip over.)
  */
-template <typename Allocator>
-inline void convertFrameToYuv420(const Frame<Allocator>& frame, uint8_t* dst) {
+inline void convertFrameToYuv420(const Frame& frame, uint8_t* dst) {
   size_t ySize = (size_t)frame.strideY * frame.height;
   size_t cSize = (size_t)frame.strideC * (frame.height / 2);
   memcpy(dst, frame.y(), ySize);
@@ -248,8 +254,7 @@ inline void convertFrameToYuv420(const Frame<Allocator>& frame, uint8_t* dst) {
  * together with width/height, must stay within the source frame - not
  * bounds-checked.
  */
-template <typename Allocator>
-inline void convertFrameToYuv420(const Frame<Allocator>& frame, int originX,
+inline void convertFrameToYuv420(const Frame& frame, int originX,
                                   int originY, int width, int height,
                                   uint8_t* dst) {
   uint8_t* dstY = dst;
@@ -284,8 +289,7 @@ inline void convertFrameToYuv420(const Frame<Allocator>& frame, int originX,
  * subsampled 2x); `dst` must have room for width*height +
  * 2*(width/2)*(height/2) uint8_t entries.
  */
-template <typename Allocator>
-inline void convertFrameToYuv420(const Frame<Allocator>& frame,
+inline void convertFrameToYuv420(const Frame& frame,
                                   int scaledWidth, int scaledHeight,
                                   int originX, int originY, int width,
                                   int height, uint8_t* dst) {
@@ -337,8 +341,7 @@ inline void convertFrameToYuv420(const Frame<Allocator>& frame,
  * scaledWidth*scaledHeight + 2*(scaledWidth/2)*(scaledHeight/2)
  * uint8_t entries.
  */
-template <typename Allocator>
-inline void convertFrameToYuv420(const Frame<Allocator>& frame,
+inline void convertFrameToYuv420(const Frame& frame,
                                   int scaledWidth, int scaledHeight,
                                   uint8_t* dst) {
   convertFrameToYuv420(frame, scaledWidth, scaledHeight, 0, 0, scaledWidth,

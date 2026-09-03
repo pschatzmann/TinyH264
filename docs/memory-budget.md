@@ -86,7 +86,7 @@ the whole object. Neither is required - the lazy default and the
 destructor's own cleanup are enough for most sketches.
 
 **Allocation failure doesn't crash.** Every heap allocation in this
-library - the picture buffers (`Frame<Allocator>`'s Y/U/V planes),
+library - the picture buffers (`Frame`'s Y/U/V planes),
 `MbInfoTable`'s per-macroblock metadata, and the encoder's RGB/YUV422
 scratch buffers alike, `begin()`'s eager path and the lazy first-use path
 alike - goes through `StdAllocator<uint8_t>` (the default `Allocator`,
@@ -117,7 +117,10 @@ heap allocation this library makes off the regular heap, via the
 per-macroblock metadata (~0.516 bytes/pixel, ~38.7KB at QVGA - by far the
 largest of the "static-looking" costs above once resolution grows), and
 the encoder's RGB/YUV422 scratch buffers all follow whichever `Allocator`
-the `Decoder<Allocator>`/`Encoder<Allocator>` was instantiated with.
+`TinyH264Decoder<Allocator>`/`TinyH264Encoder<Allocator>` was instantiated
+with - passed down at construction as a `MemoryResource` (see
+`src/common/MemoryResource.h`) to the `SoftwareDecoder`/`SoftwareEncoder` each
+one wraps internally.
 Only the NAL/slice scratch buffer (`H264_MAX_NAL_SIZE`, a fixed-size
 array, not a heap allocation at all) and the SPS/PPS tables stay on
 internal SRAM regardless - see the Estimated-max-resolution section

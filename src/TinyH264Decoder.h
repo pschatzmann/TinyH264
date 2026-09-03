@@ -1,4 +1,5 @@
 #pragma once
+#include "common/MemoryResource.h"
 #include "StdAllocator.h"
 #include "decoder/h264_decoder.h"
 #include "decoder/h264_rgb.h"
@@ -33,8 +34,11 @@
  * pass a custom allocator to place them in PSRAM or a dedicated pool
  * instead of the default heap, e.g. on an ESP32-S3 with PSRAM:
  *   TinyH264Decoder<PSRAMAllocatorESP32<uint8_t>> decoder;
- * Any Allocator used here should follow the same "return nullptr, don't
- * throw" contract StdAllocator/PSRAMAllocatorESP32 do (see
+ * TinyH264Decoder itself stays templated on Allocator for a stable
+ * public API, but internally builds an AllocatorMemoryResource<Allocator>
+ * (see MemoryResource.h) and hands that down to the non-templated
+ * SoftwareDecoder it wraps. Any Allocator used here should follow the
+ * same "return nullptr, don't throw" contract StdAllocator/PSRAMAllocatorESP32 do (see
  * StdAllocator.h's file comment for why) so an out-of-memory condition
  * surfaces as Status::kAllocationError instead of crashing.
  *
@@ -45,7 +49,7 @@
 namespace tinyh264 {
 
 /**
- * Public-facing decoder API: wraps the internal Decoder<Allocator> (see
+ * Public-facing decoder API: wraps the internal SoftwareDecoder (see
  * decoder/h264_decoder.h) behind a small push-data-get-callback interface
  * suitable for feeding NAL data straight off a file, PROGMEM buffer, or
  * network socket without the caller needing to know anything about NAL
@@ -56,6 +60,10 @@ namespace tinyh264 {
 template <typename Allocator = StdAllocator<uint8_t>>
 class TinyH264Decoder {
  public:
+  /// Builds this decoder's AllocatorMemoryResource<Allocator> and hands
+  /// it to the SoftwareDecoder it wraps - see the file comment above.
+  TinyH264Decoder() : decoder_(memRes_) {}
+
   /// Outcome of the most recent write()/decodeNext() call.
   enum class Status {
     kFrameReady,       ///< a new picture is ready via width()/height()/y()/u()/v()
@@ -390,7 +398,10 @@ class TinyH264Decoder {
    */
   size_t toRGB565(uint16_t* dst, size_t dstCapacity) const {
     size_t needed = (size_t)widthScaled() * (size_t)heightScaled();
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toRGB565: dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToRgb565(decoder_.frame(), widthScaled(), heightScaled(), dst);
     if (byteSwap_) swapBytes16(dst, needed);
     return needed;
@@ -417,7 +428,10 @@ class TinyH264Decoder {
   size_t toRGB565(int x, int y, int dx, int dy, uint16_t* dst,
                   size_t dstCapacity) const {
     size_t needed = (size_t)dx * (size_t)dy;
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toRGB565(windowed): dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToRgb565(decoder_.frame(), widthScaled(), heightScaled(), x, y, dx,
                          dy, dst);
     if (byteSwap_) swapBytes16(dst, needed);
@@ -438,7 +452,10 @@ class TinyH264Decoder {
    */
   size_t toRGB666(uint8_t* dst, size_t dstCapacity) const {
     size_t needed = (size_t)widthScaled() * (size_t)heightScaled() * 3;
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toRGB666: dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToRgb666(decoder_.frame(), widthScaled(), heightScaled(), dst);
     return needed;
   }
@@ -452,7 +469,10 @@ class TinyH264Decoder {
   size_t toRGB666(int x, int y, int dx, int dy, uint8_t* dst,
                   size_t dstCapacity) const {
     size_t needed = (size_t)dx * (size_t)dy * 3;
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toRGB666(windowed): dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToRgb666(decoder_.frame(), widthScaled(), heightScaled(), x, y, dx,
                          dy, dst);
     return needed;
@@ -469,7 +489,10 @@ class TinyH264Decoder {
    */
   size_t toRGB888(uint8_t* dst, size_t dstCapacity) const {
     size_t needed = (size_t)widthScaled() * (size_t)heightScaled() * 3;
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toRGB888: dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToRgb888(decoder_.frame(), widthScaled(), heightScaled(), dst);
     return needed;
   }
@@ -483,7 +506,10 @@ class TinyH264Decoder {
   size_t toRGB888(int x, int y, int dx, int dy, uint8_t* dst,
                   size_t dstCapacity) const {
     size_t needed = (size_t)dx * (size_t)dy * 3;
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toRGB888(windowed): dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToRgb888(decoder_.frame(), widthScaled(), heightScaled(), x, y, dx,
                          dy, dst);
     return needed;
@@ -510,7 +536,10 @@ class TinyH264Decoder {
   size_t toYUV420(uint8_t* dst, size_t dstCapacity) const {
     int w = widthScaled(), h = heightScaled();
     size_t needed = (size_t)w * h + 2 * (size_t)(w / 2) * (size_t)(h / 2);
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toYUV420: dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToYuv420(decoder_.frame(), w, h, dst);
     return needed;
   }
@@ -528,7 +557,10 @@ class TinyH264Decoder {
   size_t toYUV420(int x, int y, int dx, int dy, uint8_t* dst,
                   size_t dstCapacity) const {
     size_t needed = (size_t)dx * dy + 2 * (size_t)(dx / 2) * (size_t)(dy / 2);
-    if (dstCapacity < needed) return 0;
+    if (dstCapacity < needed) {
+      H264LOG.error("toYUV420(windowed): dst too small (%zu < %zu needed)", dstCapacity, needed);
+      return 0;
+    }
     convertFrameToYuv420(decoder_.frame(), widthScaled(), heightScaled(), x, y, dx,
                          dy, dst);
     return needed;
@@ -590,7 +622,10 @@ class TinyH264Decoder {
    */
   void onFrameReady() { frameIndex_ = nextFrameIndex_++; }
 
-  Decoder<Allocator> decoder_;
+  // Declared before decoder_: members initialize in declaration order,
+  // and decoder_ needs memRes_ already constructed to build from.
+  AllocatorMemoryResource<Allocator> memRes_;
+  SoftwareDecoder decoder_;
   FrameCallback callback_ = nullptr;
   void* userData_ = nullptr;
   Status lastStatus_ = Status::kNeedMoreData;

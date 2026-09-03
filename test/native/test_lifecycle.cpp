@@ -1,9 +1,9 @@
 /*
  * Desktop-only test: verifies the Encoder/Decoder begin()/end() lifecycle
- * methods (encoder/h264_encoder.h's Encoder::begin()/end(), decoder/
- * h264_decoder.h's Decoder::begin()/end(), and their TinyH264Encoder/
- * TinyH264Decoder public-API wrappers). Uses the internal Encoder<>/
- * Decoder<> classes directly (not the TinyH264*<> wrappers) since this
+ * methods (encoder/h264_encoder.h's SoftwareEncoder::begin()/end(), decoder/
+ * h264_decoder.h's SoftwareDecoder::begin()/end(), and their TinyH264Encoder/
+ * TinyH264Decoder public-API wrappers). Uses the internal SoftwareEncoder/
+ * SoftwareDecoder classes directly (not the TinyH264*<> wrappers) since this
  * test needs to inspect frame().dataY.empty() to confirm memory was
  * actually freed/reserved, which the public wrappers don't expose.
  *
@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include "../../src/common/MemoryResource.h"
 #include "../../src/decoder/h264_decoder.h"
 #include "../../src/encoder/h264_encoder.h"
 
@@ -55,7 +56,7 @@ static const int W = 176, H = 144;
 static const size_t FRAME_SIZE = (size_t)W * H * 3 / 2;
 int failures = 0;
 
-static size_t encodeSequence(Encoder<std::allocator<uint8_t>>& enc,
+static size_t encodeSequence(SoftwareEncoder& enc,
                               const std::vector<uint8_t>& allFrames,
                               int numFrames, std::vector<uint8_t>& bs) {
   size_t total = 0;
@@ -92,14 +93,16 @@ int main() {
   std::vector<uint8_t> bsPlain(2000000), bsBegin(2000000);
   size_t nPlain, nBegin;
   {
-    Encoder<std::allocator<uint8_t>> encPlain;
+    AllocatorMemoryResource<std::allocator<uint8_t>> mrPlain;
+    SoftwareEncoder encPlain(mrPlain);
     if (!encPlain.frame().dataY.empty()) {
       printf("FAIL: frame_ allocated before any encode/begin() call\n");
       failures++;
     }
     nPlain = encodeSequence(encPlain, allFrames, numFrames, bsPlain);
 
-    Encoder<std::allocator<uint8_t>> encBegin;
+    AllocatorMemoryResource<std::allocator<uint8_t>> mrBegin;
+    SoftwareEncoder encBegin(mrBegin);
     encBegin.begin(/*reserveColorConversionScratch=*/true);
     if (encBegin.frame().dataY.empty()) {
       printf("FAIL: begin() didn't eagerly allocate frame_\n");
@@ -120,7 +123,8 @@ int main() {
 
   // --- 3/4. Encoder::end() frees memory and truly resets stream state ---
   {
-    Encoder<std::allocator<uint8_t>> enc;
+    AllocatorMemoryResource<std::allocator<uint8_t>> mr;
+    SoftwareEncoder enc(mr);
     std::vector<uint8_t> bsFirst(2000000);
     encodeSequence(enc, allFrames, numFrames, bsFirst);
     if (enc.frame().dataY.empty()) {
@@ -149,20 +153,22 @@ int main() {
 
   // --- 5. Decoder::begin()/end() ---
   {
-    Decoder<std::allocator<uint8_t>> decPlain;
+    AllocatorMemoryResource<std::allocator<uint8_t>> mrDecPlain;
+    SoftwareDecoder decPlain(mrDecPlain);
     if (!decPlain.frame().dataY.empty()) {
       printf("FAIL: curFrame_ allocated before any decode/begin() call\n");
       failures++;
     }
 
-    Decoder<std::allocator<uint8_t>> decBegin;
+    AllocatorMemoryResource<std::allocator<uint8_t>> mrDecBegin;
+    SoftwareDecoder decBegin(mrDecBegin);
     decBegin.begin();
     if (decBegin.frame().dataY.empty()) {
       printf("FAIL: Decoder::begin() didn't eagerly allocate curFrame_\n");
       failures++;
     }
 
-    auto decodeAll = [&](Decoder<std::allocator<uint8_t>>& dec) {
+    auto decodeAll = [&](SoftwareDecoder& dec) {
       dec.setInput(bsPlain.data(), nPlain);
       int frames = 0;
       while (true) {

@@ -51,10 +51,9 @@ namespace tinyh264 {
  * PPS field a macroblock encode actually needs (chroma_qp_index_offset)
  * is carried directly instead of pulling in the decode-side struct.
  */
-template <typename Allocator>
 struct MbEncodeContext {
-  Frame<Allocator>* frame;
-  MbInfoTable<Allocator>* mbInfo;
+  Frame* frame;
+  MbInfoTable* mbInfo;
   int chromaQpIndexOffset;
   int sliceId;
   int mbX, mbY;
@@ -71,8 +70,7 @@ struct MbEncodeContext {
  * written into `ctx.frame` at this macroblock's position and the source
  * picture at the same position - the mode-decision cost function.
  */
-template <typename Allocator>
-inline int sadLuma16x16(const MbEncodeContext<Allocator>& ctx) {
+inline int sadLuma16x16(const MbEncodeContext& ctx) {
   int px = ctx.mbX * 16, py = ctx.mbY * 16;
   int sad = 0;
   for (int y = 0; y < 16; y++) {
@@ -125,8 +123,7 @@ inline int blockVarianceSad4x4(const uint8_t* src, int stride) {
  * choose I_4x4, and does it measurably help on detailed content" check
  * this was verified against).
  */
-template <typename Allocator>
-inline bool shouldUseIntra4x4(const MbEncodeContext<Allocator>& ctx,
+inline bool shouldUseIntra4x4(const MbEncodeContext& ctx,
                                int i16x16Sad) {
   int px0 = ctx.mbX * 16, py0 = ctx.mbY * 16;
   int totalVarSad = 0;
@@ -168,8 +165,7 @@ inline int sadChroma8x8(const uint8_t* plane, int stride, int px, int py,
  * that function's own body - so re-predicting with the winning mode
  * after trying every candidate is safe and needs no scratch buffer).
  */
-template <typename Allocator>
-inline int chooseIntra16x16Mode(MbEncodeContext<Allocator>& ctx,
+inline int chooseIntra16x16Mode(MbEncodeContext& ctx,
                                  bool leftAvail, bool topAvail,
                                  bool topLeftAvail) {
   int candidates[4];
@@ -202,8 +198,7 @@ inline int chooseIntra16x16Mode(MbEncodeContext<Allocator>& ctx,
  * predicted" approach as chooseIntra16x16Mode() above, run once per
  * plane.
  */
-template <typename Allocator>
-inline int chooseChromaMode(MbEncodeContext<Allocator>& ctx, bool leftAvail,
+inline int chooseChromaMode(MbEncodeContext& ctx, bool leftAvail,
                              bool topAvail, bool topLeftAvail) {
   int candidates[4];
   int nCand = 0;
@@ -245,8 +240,7 @@ inline int chooseChromaMode(MbEncodeContext<Allocator>& ctx, bool leftAvail,
  * `mb.chromaPredMode`/`mb.cbpChroma`; `chromaBlocks`/`chromaDcGrid` are
  * caller-owned scratch, consumed later by writeChromaResidual().
  */
-template <typename Allocator>
-inline int quantizeChromaIntra(MbEncodeContext<Allocator>& ctx,
+inline int quantizeChromaIntra(MbEncodeContext& ctx,
                                 MacroblockInfo& mb, bool leftAvail,
                                 bool topAvail, bool topLeftAvail,
                                 int targetQp, int32_t chromaBlocks[2][4][16],
@@ -296,8 +290,7 @@ inline int quantizeChromaIntra(MbEncodeContext<Allocator>& ctx,
  * decodeMacroblockIntraWithType()'s own field order). Shared the same
  * way as quantizeChromaIntra() above.
  */
-template <typename Allocator>
-inline void writeChromaResidual(BitWriter& bw, MbEncodeContext<Allocator>& ctx,
+inline void writeChromaResidual(BitWriter& bw, MbEncodeContext& ctx,
                                  MacroblockInfo& mb, int targetQp,
                                  int32_t chromaBlocks[2][4][16],
                                  int32_t chromaDcGrid[2][4]) {
@@ -386,9 +379,8 @@ inline void writeChromaResidual(BitWriter& bw, MbEncodeContext<Allocator>& ctx,
  * Encoder::encodePFrame()'s Intra-fallback path
  * (h264_encoder.h) for the P-slice case.
  */
-template <typename Allocator>
 inline int encodeMacroblockIntra16x16(BitWriter& bw,
-                                       MbEncodeContext<Allocator>& ctx,
+                                       MbEncodeContext& ctx,
                                        int qpPrev, int targetQp,
                                        uint32_t mbTypeOffset = 0) {
   MacroblockInfo& mb = ctx.mbInfo->at(ctx.mbX, ctx.mbY);
@@ -555,8 +547,7 @@ inline uint32_t cbpCodeForIntra4x4(int cbpLuma, int cbpChroma) {
  * into `ctx.frame` (same "safe to just re-predict the winner, no
  * scratch buffer needed" reasoning as chooseIntra16x16Mode()).
  */
-template <typename Allocator>
-inline int chooseIntra4x4Mode(MbEncodeContext<Allocator>& ctx,
+inline int chooseIntra4x4Mode(MbEncodeContext& ctx,
                                const Neighbors4x4& n, int px, int py,
                                int predictedMode) {
   int candidates[9];
@@ -618,9 +609,8 @@ inline int chooseIntra4x4Mode(MbEncodeContext<Allocator>& ctx,
  * encodeMacroblockIntra16x16()'s matching parameter and
  * Encoder::encodePFrame()'s Intra-fallback path (h264_encoder.h).
  */
-template <typename Allocator>
 inline int encodeMacroblockIntra4x4(BitWriter& bw,
-                                     MbEncodeContext<Allocator>& ctx,
+                                     MbEncodeContext& ctx,
                                      int qpPrev, int targetQp,
                                      uint32_t mbTypeOffset = 0) {
   MacroblockInfo& mb = ctx.mbInfo->at(ctx.mbX, ctx.mbY);

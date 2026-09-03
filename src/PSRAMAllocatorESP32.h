@@ -36,7 +36,7 @@
  * failure (even if both the PSRAM and regular-heap fallback attempts
  * fail) - the same no-throw contract StdAllocator.h's StdAllocator
  * follows and for the same reason (see that file's comment): it lets
- * common/h264_frame.h's Buffer<Allocator> detect and report an allocation
+ * common/h264_buffer.h's Buffer<T> detect and report an allocation
  * failure as DecodeStatus::kAllocationError instead of crashing, on every
  * toolchain regardless of whether C++ exceptions are enabled.
  */

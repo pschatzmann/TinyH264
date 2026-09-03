@@ -35,18 +35,19 @@
 #define H264_MAX_HEIGHT 240
 #endif
 
-// Just the defaults - Decoder::setMaxDimension()/Encoder::setMaxDimension()
-// (or the TinyH264Decoder/TinyH264Encoder wrappers of the same name)
+// Just the defaults - SoftwareDecoder::setMaxDimension()/
+// SoftwareEncoder::setMaxDimension() (or the TinyH264Decoder/
+// TinyH264Encoder wrappers of the same name)
 // override these per instance at runtime instead, if you'd rather not use
 // a #define.
 
 /*
  * Compile-time *upper bound* on stored reference pictures - sizes a static
- * array of Frame<Allocator> (Decoder::refFrames_), so it must be fixed at
+ * array of Frame (SoftwareDecoder::refFrames_), so it must be fixed at
  * compile time like the other limits in this file. The *active* count used
  * by any given decode is a separate, runtime-adjustable value (default:
  * this constant) - see TinyH264Decoder::setMaxRefFrames() /
- * Decoder::setMaxRefFrames(), clamped to [1, H264_MAX_REF_FRAMES]. Raising
+ * SoftwareDecoder::setMaxRefFrames(), clamped to [1, H264_MAX_REF_FRAMES]. Raising
  * the runtime value can never exceed this compile-time bound; raise this
  * constant (via -D or #define before including any TinyH264 header) if you
  * need more headroom than the default.

@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "../common/Logger.h"
 #include "h264_bitreader.h"
 #include "h264_config.h"
 #include "h264_nal.h"
@@ -99,7 +100,10 @@ inline bool parseRefPicListModificationL0(BitReader& br, SliceHeader* sh) {
       } else if (idc == 2) {
         br.ue();  // long_term_pic_num
       }
-      if (br.error() || ++guard > 64) return false;
+      if (br.error() || ++guard > 64) {
+        H264LOG.error("parseRefPicListModificationL0: bitstream error or runaway loop");
+        return false;
+      }
     } while (idc != 3);
   }
   return true;
@@ -140,7 +144,10 @@ inline bool parseDecRefPicMarking(BitReader& br, SliceHeader* sh) {
       case 6: br.ue(); break;                 // long_term_frame_idx
       default: break;                         // 0 = end of loop
     }
-    if (br.error() || ++guard > 64) return false;
+    if (br.error() || ++guard > 64) {
+      H264LOG.error("parseDecRefPicMarking: bitstream error or runaway loop");
+      return false;
+    }
   } while (op != 0);
   return true;
 }
@@ -218,6 +225,7 @@ inline bool parseSliceHeader(BitReader& br, const NalUnit& nal, const Sps& sps,
        * with the bitstream) but not implemented - see
        * parseRefPicListModificationL0()'s comment.
        */
+      H264LOG.warn("parseSliceHeader: explicit reference list reordering not supported");
       sh->unsupported = true;
       return true;
     }
@@ -231,6 +239,7 @@ inline bool parseSliceHeader(BitReader& br, const NalUnit& nal, const Sps& sps,
      * than implement pred_weight_table() parsing for a syntax element we
      * can't apply anyway, flag the slice unsupported now.
      */
+    H264LOG.warn("parseSliceHeader: weighted prediction not supported");
     sh->unsupported = true;
     return true;
   }
@@ -247,6 +256,7 @@ inline bool parseSliceHeader(BitReader& br, const NalUnit& nal, const Sps& sps,
        * sliding window process is (see parseDecRefPicMarking()'s comment
        * and Decoder::decodeSlice()).
        */
+      H264LOG.warn("parseSliceHeader: adaptive (MMCO-based) reference marking not supported");
       sh->unsupported = true;
       return true;
     }
@@ -267,11 +277,13 @@ inline bool parseSliceHeader(BitReader& br, const NalUnit& nal, const Sps& sps,
   // pps.numSliceGroupsMinus1 > 0 (FMO) is already rejected in parsePps().
 
   if (br.error()) {
+    H264LOG.error("parseSliceHeader: bitstream error/truncation");
     sh->unsupported = true;
     return true;
   }
 
   if (sh->sliceType != kSliceI && sh->sliceType != kSliceP) {
+    H264LOG.warn("parseSliceHeader: slice_type=%u (B/SP/SI) not supported", sh->sliceTypeRaw);
     sh->unsupported = true;  // B / SP / SI not supported
     return true;
   }

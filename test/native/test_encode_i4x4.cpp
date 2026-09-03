@@ -29,6 +29,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <vector>
+#include "../../src/common/MemoryResource.h"
+#include "../../src/StdAllocator.h"
 #include "../../src/TinyH264Decoder.h"
 #include "../../src/TinyH264Encoder.h"
 #include "../../src/encoder/h264_encoder.h"
@@ -64,10 +66,11 @@ size_t encodeAlwaysI16x16(const uint8_t* srcY, int srcStrideY,
                            const uint8_t* srcU, const uint8_t* srcV,
                            int srcStrideC, int width, int height, int qp,
                            uint8_t* dst, size_t dstCapacity) {
-  Frame<> frame;
+  AllocatorMemoryResource<StdAllocator<uint8_t>> mr;
+  Frame frame(mr);
   frame.setSize(width, height);
   int mbWidth = width / 16, mbHeight = height / 16;
-  MbInfoTable<> mbInfo;
+  MbInfoTable mbInfo(mr);
   mbInfo.reset(mbWidth, mbHeight);
 
   size_t o = 0;
@@ -90,7 +93,7 @@ size_t encodeAlwaysI16x16(const uint8_t* srcY, int srcStrideY,
   BitWriter sliceW(sliceScratch, sizeof(sliceScratch));
   writeSliceHeaderIdr(sliceW);
 
-  MbEncodeContext<StdAllocator<uint8_t>> ctx;
+  MbEncodeContext ctx;
   ctx.frame = &frame;
   ctx.mbInfo = &mbInfo;
   ctx.chromaQpIndexOffset = 0;

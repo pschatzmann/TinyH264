@@ -166,8 +166,7 @@ inline uint8_t interpLumaSample(const uint8_t* plane, int stride, int w,
  * clause 8.4.2.2. mvX/mvY are in quarter-luma-sample units; originX/originY
  * are the block's integer top-left position in the current picture.
  */
-template <typename Allocator>
-inline void motionCompLuma(uint8_t* dst, int dstStride, const Frame<Allocator>& ref,
+inline void motionCompLuma(uint8_t* dst, int dstStride, const Frame& ref,
                             int originX, int originY, int blockW, int blockH,
                             int mvX, int mvY) {
   int fullX = originX + (mvX >> 2);

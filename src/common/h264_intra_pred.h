@@ -92,8 +92,7 @@ struct Neighbors4x4 {
  * clause 8.3.1.2.1 top-right substitution (repeat the last top sample)
  * when the true top-right neighbor doesn't exist.
  */
-template <typename Allocator>
-inline Neighbors4x4 gatherNeighbors4x4(const Frame<Allocator>& f, int px, int py,
+inline Neighbors4x4 gatherNeighbors4x4(const Frame& f, int px, int py,
                                         int blkIdx, bool mbLeftAvail,
                                         bool mbTopAvail, bool mbTopLeftAvail,
                                         bool mbTopRightAvail) {
@@ -143,8 +142,7 @@ inline Neighbors4x4 gatherNeighbors4x4(const Frame<Allocator>& f, int px, int py
  * neighbors are available (clause 8.3.1.1), so only kI4Dc needs the
  * explicit availability branches.
  */
-template <typename Allocator>
-inline void predictIntra4x4(Frame<Allocator>& f, int px, int py, int mode,
+inline void predictIntra4x4(Frame& f, int px, int py, int mode,
                              const Neighbors4x4& n) {
   uint8_t pred[16];  // raster, [y*4+x]
   auto topAt = [&](int i) -> int { return i < 0 ? n.topLeft : n.top[i]; };
@@ -337,8 +335,7 @@ inline int planePredict(int x, int y, int size, const uint8_t* top,
  * explicitly since kI16Dc doesn't have that same guarantee at the whole-MB
  * level for the topAvail-only/leftAvail-only/neither cases).
  */
-template <typename Allocator>
-inline void predictIntra16x16(Frame<Allocator>& f, int mbX, int mbY, int mode,
+inline void predictIntra16x16(Frame& f, int mbX, int mbY, int mode,
                                bool leftAvail, bool topAvail,
                                bool topLeftAvail) {
   int px = mbX * 16, py = mbY * 16;

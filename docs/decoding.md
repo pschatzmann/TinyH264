@@ -233,7 +233,9 @@ other decode failure, rather than the process going down. See
 note, and `StdAllocator.h`'s file comment for the full rationale
 (including why a plain `std::vector` can't safely detect this on its
 own) - `PSRAMAllocatorESP32` follows the same no-throw contract, and a
-custom `Allocator` should too if you supply your own.
+custom `Allocator` should too if you supply your own. Every allocation
+failure, and every other decode failure (`kError`/`kUnsupported`), also
+logs via `H264LOG` - see [Logging](logging.md).
 
 See `examples/DecodeFromProgmem/` for a complete, self-contained sketch
 (a tiny embedded test clip - no camera/SD/network needed) that runs on

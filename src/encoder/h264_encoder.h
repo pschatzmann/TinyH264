@@ -1,7 +1,8 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
-#include "../StdAllocator.h"
+#include "../common/Logger.h"
+#include "../common/MemoryResource.h"
 #include "h264_bitwriter.h"
 #include "h264_color_convert.h"
 #include "h264_macroblock_encode.h"
@@ -58,37 +59,46 @@ namespace tinyh264 {
 
 /**
  * Encodes one Baseline-profile CAVLC picture at a time into a real H.264
- * Annex-B stream. Templated on Allocator (default StdAllocator<uint8_t>,
- * see StdAllocator.h) exactly like decoder::Decoder, for the same reason:
- * the two Frame<Allocator> objects this class holds (the closed-loop
- * reconstruction plus the single P-frame reference - see
+ * Annex-B stream. Backed by a MemoryResource (../MemoryResource.h)
+ * passed to the constructor, exactly like decoder::SoftwareDecoder, for
+ * the same reason: the two Frame objects this class holds (the
+ * closed-loop reconstruction plus the single P-frame reference - see
  * h264_macroblock_encode.h's MbEncodeContext doc comment for why an
- * encoder needs one at all) can be placed in PSRAM via a custom allocator
- * on boards that have it. An allocation failure (out of memory) is
- * reported as a 0 return from encodeFrame() (and its color-format
- * overloads) rather than crashing - see StdAllocator.h's file comment
- * for the mechanics.
+ * encoder needs one at all) can be placed in PSRAM via a custom
+ * allocator on boards that have it (see PSRAMAllocatorESP32.h, wrapped
+ * via AllocatorMemoryResource - the mechanism TinyH264Encoder<Allocator>
+ * uses to build the MemoryResource this class actually receives). An
+ * allocation failure (out of memory) is reported as a 0 return from
+ * encodeFrame() (and its color-format overloads) rather than crashing -
+ * see StdAllocator.h's file comment for the mechanics.
  */
-template <typename Allocator = StdAllocator<uint8_t>>
-class Encoder {
+class SoftwareEncoder {
  public:
   /**
-   * Constructs an Encoder, optionally pre-configuring picture width/
-   * height (see setSize()'s own comment) and periodic keyframe interval
-   * (see setKeyframeInterval()'s own comment) in one step instead of
-   * calling both setters separately afterward - convenient when they're
-   * already known at construction time (e.g. a fixed-resolution camera
-   * feed). All three default to 0 (width/height unconfigured, no
-   * periodic keyframe), matching a default-constructed Encoder's
-   * previous behavior exactly - `Encoder<> enc;` still compiles and
-   * behaves the same as before this constructor existed. setSize() (or
-   * this constructor's `width`/`height`) must establish a real size
-   * before the first encodeFrame() call, or it returns 0.
+   * Constructs a SoftwareEncoder backed by `memRes` (propagated to every
+   * Frame/Buffer/MbInfoTable member this class holds), optionally
+   * pre-configuring picture width/height (see setSize()'s own comment)
+   * and periodic keyframe interval (see setKeyframeInterval()'s own
+   * comment) in one step instead of calling both setters separately
+   * afterward - convenient when they're already known at construction
+   * time (e.g. a fixed-resolution camera feed). `width`/`height` default
+   * to 0 (unconfigured); setSize() (or this constructor's `width`/
+   * `height`) must establish a real size before the first encodeFrame()
+   * call, or it returns 0.
    */
-  Encoder(int width = 0, int height = 0, int keyframeInterval = 0) {
+  SoftwareEncoder(MemoryResource& memRes, int width = 0, int height = 0,
+                   int keyframeInterval = 0)
+      : frame_(memRes), mbInfo_(memRes), yuvY_(memRes), yuvU_(memRes),
+        yuvV_(memRes), refFrame_(memRes) {
     setSize(width, height);
     setKeyframeInterval(keyframeInterval);
   }
+
+  /// Virtual so a subclass (see encoder/h264_hw_encoder_p4.h::HwEncoderP4)
+  /// can be destroyed correctly through a base-class pointer - required
+  /// once this class has any virtual method at all, even though nothing
+  /// in this codebase currently deletes a SoftwareEncoder that way.
+  virtual ~SoftwareEncoder() = default;
 
   /**
    * Encodes one picture, automatically deciding I-frame vs. P-frame -
@@ -114,9 +124,13 @@ class Encoder {
    * picture state may still have been updated - call again with a
    * bigger buffer rather than trying to resume).
    */
-  size_t encodeFrame(const uint8_t* srcY, const uint8_t* srcU,
-                      const uint8_t* srcV, uint8_t* dst, size_t dstCapacity) {
-    if (width_ <= 0 || height_ <= 0) return 0;
+  virtual size_t encodeFrame(const uint8_t* srcY, const uint8_t* srcU,
+                              const uint8_t* srcV, uint8_t* dst,
+                              size_t dstCapacity) {
+    if (width_ <= 0 || height_ <= 0) {
+      H264LOG.error("encodeFrame: no valid size configured (call setSize() first)");
+      return 0;
+    }
     int strideY = defaultStrideY_ > 0 ? defaultStrideY_ : width_;
     int strideC = defaultStrideC_ > 0 ? defaultStrideC_ : width_ / 2;
     return encodeFrameExplicit(srcY, strideY, srcU, srcV, strideC, width_,
@@ -132,9 +146,12 @@ class Encoder {
    * not a lossless passthrough. `rgbStride` defaults to `width*3`
    * (tightly packed) unless overridden via setPackedStride().
    */
-  size_t encodeFrameRgb888(const uint8_t* rgb, uint8_t* dst,
-                            size_t dstCapacity) {
-    if (width_ <= 0 || height_ <= 0) return 0;
+  virtual size_t encodeFrameRgb888(const uint8_t* rgb, uint8_t* dst,
+                                    size_t dstCapacity) {
+    if (width_ <= 0 || height_ <= 0) {
+      H264LOG.error("encodeFrameRgb888: no valid size configured (call setSize() first)");
+      return 0;
+    }
     int stride = defaultPackedStride_ > 0 ? defaultPackedStride_ : width_ * 3;
     return encodeFrameRgb888Explicit(rgb, stride, width_, height_, defaultQp_,
                                       dst, dstCapacity);
@@ -146,9 +163,12 @@ class Encoder {
    * TinyH264Decoder::toRGB666()'s convention). `rgbStride` defaults to
    * `width*3` (tightly packed) unless overridden via setPackedStride().
    */
-  size_t encodeFrameRgb666(const uint8_t* rgb666, uint8_t* dst,
-                            size_t dstCapacity) {
-    if (width_ <= 0 || height_ <= 0) return 0;
+  virtual size_t encodeFrameRgb666(const uint8_t* rgb666, uint8_t* dst,
+                                    size_t dstCapacity) {
+    if (width_ <= 0 || height_ <= 0) {
+      H264LOG.error("encodeFrameRgb666: no valid size configured (call setSize() first)");
+      return 0;
+    }
     int stride = defaultPackedStride_ > 0 ? defaultPackedStride_ : width_ * 3;
     return encodeFrameRgb666Explicit(rgb666, stride, width_, height_,
                                       defaultQp_, dst, dstCapacity);
@@ -160,9 +180,12 @@ class Encoder {
    * `rgbStride` (in uint16_t entries) defaults to `width` (tightly
    * packed) unless overridden via setPackedStride().
    */
-  size_t encodeFrameRgb565(const uint16_t* rgb565, uint8_t* dst,
-                            size_t dstCapacity) {
-    if (width_ <= 0 || height_ <= 0) return 0;
+  virtual size_t encodeFrameRgb565(const uint16_t* rgb565, uint8_t* dst,
+                                    size_t dstCapacity) {
+    if (width_ <= 0 || height_ <= 0) {
+      H264LOG.error("encodeFrameRgb565: no valid size configured (call setSize() first)");
+      return 0;
+    }
     int stride = defaultPackedStride_ > 0 ? defaultPackedStride_ : width_;
     return encodeFrameRgb565Explicit(rgb565, stride, width_, height_,
                                       defaultQp_, dst, dstCapacity);
@@ -174,9 +197,12 @@ class Encoder {
    * convention, e.g. OV2640/OV7670 output). `yuyvStride` defaults to
    * `width*2` (tightly packed) unless overridden via setPackedStride().
    */
-  size_t encodeFrameYuv422(const uint8_t* yuyv, uint8_t* dst,
-                            size_t dstCapacity) {
-    if (width_ <= 0 || height_ <= 0) return 0;
+  virtual size_t encodeFrameYuv422(const uint8_t* yuyv, uint8_t* dst,
+                                    size_t dstCapacity) {
+    if (width_ <= 0 || height_ <= 0) {
+      H264LOG.error("encodeFrameYuv422: no valid size configured (call setSize() first)");
+      return 0;
+    }
     int stride = defaultPackedStride_ > 0 ? defaultPackedStride_ : width_ * 2;
     return encodeFrameYuv422Explicit(yuyv, stride, width_, height_,
                                       defaultQp_, dst, dstCapacity);
@@ -196,11 +222,15 @@ class Encoder {
    * the exact step sizes. Must be called at least once before ever
    * leaving `qp` at -1; can be called again later to retarget mid-
    * sequence (e.g. a bandwidth change) - takes effect starting with the
-   * next rate-controlled call.
+   * next rate-controlled call. Virtual and bool-returning so a subclass
+   * that doesn't support rate control (see encoder/h264_hw_encoder_p4.h::
+   * HwEncoderP4) can report that back to the caller instead of silently
+   * ignoring the call - always true here.
    */
-  void setTargetBitrate(int bitsPerSecond, double fps) {
+  virtual bool setTargetBitrate(int bitsPerSecond, double fps) {
     int bytes = (int)(bitsPerSecond / fps / 8.0);
     targetFrameBytes_ = bytes > 0 ? bytes : 1;
+    return true;
   }
 
   /**
@@ -297,11 +327,15 @@ class Encoder {
    * correctness issue). Clamped to >= 1; values are otherwise
    * unconstrained (a larger-than-8 range is legal too, just slower and
    * rarely useful since real content-to-content motion beyond 8 pixels/
-   * frame at typical frame rates is uncommon).
+   * frame at typical frame rates is uncommon). Virtual and bool-returning
+   * so a subclass that doesn't support motion search at all (see
+   * encoder/h264_hw_encoder_p4.h::HwEncoderP4) can report that back to
+   * the caller instead of silently ignoring the call - always true here.
    */
-  void setMotionSearchRange(int range) {
+  virtual bool setMotionSearchRange(int range) {
     if (range < 1) range = 1;
     motionSearchRange_ = range;
+    return true;
   }
   /// The current motion search range - see setMotionSearchRange().
   int motionSearchRange() const { return motionSearchRange_; }
@@ -319,10 +353,15 @@ class Encoder {
    * SAD (a real, data-dependent quality/compression tradeoff, not just a
    * speed dial - see docs/optimizations.md's "Encoding" chapter,
    * "Fast search algorithm"). Defaults to Exhaustive so existing
-   * behavior/bit-exactness is unchanged unless a caller opts in.
+   * behavior/bit-exactness is unchanged unless a caller opts in. Virtual
+   * and bool-returning so a subclass that doesn't support motion search
+   * at all (see encoder/h264_hw_encoder_p4.h::HwEncoderP4) can report
+   * that back to the caller instead of silently ignoring the call -
+   * always true here.
    */
-  void setMotionSearchAlgorithm(MotionSearchAlgorithm algorithm) {
+  virtual bool setMotionSearchAlgorithm(MotionSearchAlgorithm algorithm) {
     motionSearchAlgorithm_ = algorithm;
+    return true;
   }
   /// The current motion search algorithm - see setMotionSearchAlgorithm().
   MotionSearchAlgorithm motionSearchAlgorithm() const {
@@ -349,11 +388,13 @@ class Encoder {
    * but insulates a caller from needing to know that's currently the only
    * one. See docs/encoding.md and docs/optimizations.md for the
    * real compression/quality tradeoff `Fast` carries - this is not a free
-   * win, so it stays opt-in either way it's reached.
+   * win, so it stays opt-in either way it's reached. Virtual and
+   * bool-returning for the same reason as setMotionSearchAlgorithm()
+   * (which this forwards to) - always true here.
    */
-  void setAllOptimizationsActive(bool active) {
-    setMotionSearchAlgorithm(active ? MotionSearchAlgorithm::Fast
-                                     : MotionSearchAlgorithm::Exhaustive);
+  virtual bool setAllOptimizationsActive(bool active) {
+    return setMotionSearchAlgorithm(active ? MotionSearchAlgorithm::Fast
+                                            : MotionSearchAlgorithm::Exhaustive);
   }
 
   /**
@@ -403,7 +444,7 @@ class Encoder {
    * for measuring this encoder's own quality (e.g. PSNR against the
    * source) without needing a separate decode pass.
    */
-  const Frame<Allocator>& frame() const { return frame_; }
+  const Frame& frame() const { return frame_; }
 
   /**
    * Reserves this encoder's picture buffers (frame_ and refFrame_, each
@@ -438,6 +479,9 @@ class Encoder {
     haveReference_ = false;
     frameNum_ = 0;
     framesSinceKeyframe_ = 0;
+    if (!ok) {
+      H264LOG.error("SoftwareEncoder::begin: one or more picture buffer allocations failed");
+    }
     return ok;
   }
 
@@ -463,7 +507,7 @@ class Encoder {
    * begin()/encodeFrame() again afterward to start over (after a fresh
    * setSize() call, since end() does reset width_/height_).
    */
-  void end() {
+  virtual void end() {
     frame_.release();
     refFrame_.release();
     yuvY_.release();
@@ -515,13 +559,25 @@ class Encoder {
                        const uint8_t* srcV, int srcStrideC, int width,
                        int height, int qp, uint8_t* dst, size_t dstCapacity) {
     if (width <= 0 || height <= 0 || (width % 16) != 0 || (height % 16) != 0) {
+      H264LOG.error("encodeIFrame: invalid size %dx%d (must be >0 and a multiple of 16)",
+                     width, height);
       return 0;
     }
-    if (width > maxWidth_ || height > maxHeight_) return 0;
+    if (width > maxWidth_ || height > maxHeight_) {
+      H264LOG.error("encodeIFrame: %dx%d exceeds the allocation ceiling %dx%d - see setMaxDimension()",
+                     width, height, maxWidth_, maxHeight_);
+      return 0;
+    }
     if (!resolveQp(&qp)) return 0;
-    if (!frame_.setSize(width, height)) return 0;  // out of memory - see StdAllocator.h
+    if (!frame_.setSize(width, height)) {
+      H264LOG.error("encodeIFrame: frame_.setSize(%d,%d) failed", width, height);
+      return 0;
+    }
     int mbWidth = width / 16, mbHeight = height / 16;
-    if (!mbInfo_.reset(mbWidth, mbHeight)) return 0;  // out of memory - see StdAllocator.h
+    if (!mbInfo_.reset(mbWidth, mbHeight)) {
+      H264LOG.error("encodeIFrame: mbInfo_.reset(%d,%d) failed", mbWidth, mbHeight);
+      return 0;
+    }
     width_ = width;
     height_ = height;
 
@@ -530,25 +586,38 @@ class Encoder {
     uint8_t hdrRbsp[64];
     BitWriter spsW(hdrRbsp, sizeof(hdrRbsp));
     writeSpsRbsp(spsW, width, height, /*levelIdc=*/30, /*maxNumRefFrames=*/1);
-    if (spsW.error()) return 0;
+    if (spsW.error()) {
+      H264LOG.error("encodeIFrame: SPS RBSP overflowed its scratch buffer");
+      return 0;
+    }
     size_t n = writeNalUnit(dst + o, dstCapacity - o, /*nalRefIdc=*/3,
                              kNalSps, hdrRbsp, spsW.bytesWritten());
-    if (n == 0) return 0;
+    if (n == 0) {
+      H264LOG.error("encodeIFrame: dst too small for the SPS NAL (dstCapacity=%zu)", dstCapacity);
+      return 0;
+    }
     o += n;
 
     BitWriter ppsW(hdrRbsp, sizeof(hdrRbsp));
     writePpsRbsp(ppsW, qp);
     ppsBaseQp_ = qp;
-    if (ppsW.error()) return 0;
+    if (ppsW.error()) {
+      H264LOG.error("encodeIFrame: PPS RBSP overflowed its scratch buffer");
+      return 0;
+    }
     n = writeNalUnit(dst + o, dstCapacity - o, /*nalRefIdc=*/3, kNalPps,
                       hdrRbsp, ppsW.bytesWritten());
-    if (n == 0) return 0;
+    if (n == 0) {
+      H264LOG.error("encodeIFrame: dst too small for the PPS NAL (dstCapacity=%zu, used=%zu)",
+                     dstCapacity, o);
+      return 0;
+    }
     o += n;
 
     BitWriter sliceW(sliceScratch_, sizeof(sliceScratch_));
     writeSliceHeaderIdr(sliceW);
 
-    MbEncodeContext<Allocator> ctx;
+    MbEncodeContext ctx;
     ctx.frame = &frame_;
     ctx.mbInfo = &mbInfo_;
     ctx.chromaQpIndexOffset = 0;  // matches writePpsRbsp()'s fixed choice
@@ -588,15 +657,26 @@ class Encoder {
         } else {
           qpRunning = encodeMacroblockIntra16x16(sliceW, ctx, qpRunning, qp);
         }
-        if (sliceW.error()) return 0;
+        if (sliceW.error()) {
+          H264LOG.error("encodeIFrame: slice scratch buffer overflowed at mb(%d,%d)",
+                         mbX, mbY);
+          return 0;
+        }
       }
     }
     sliceW.rbspTrailingBits();
-    if (sliceW.error()) return 0;
+    if (sliceW.error()) {
+      H264LOG.error("encodeIFrame: slice scratch buffer overflowed writing trailing bits");
+      return 0;
+    }
 
     n = writeNalUnit(dst + o, dstCapacity - o, /*nalRefIdc=*/3, kNalSliceIdr,
                       sliceScratch_, sliceW.bytesWritten());
-    if (n == 0) return 0;
+    if (n == 0) {
+      H264LOG.error("encodeIFrame: dst too small for the IDR slice NAL (dstCapacity=%zu, used=%zu)",
+                     dstCapacity, o);
+      return 0;
+    }
     o += n;
 
     /*
@@ -620,7 +700,10 @@ class Encoder {
     // a reference for the next encodePFrame() call - report the same
     // failure a bad width/height/qp would (return 0), rather than
     // returning a byte count with no usable reference behind it.
-    if (!refFrame_.copyFrom(frame_)) return 0;
+    if (!refFrame_.copyFrom(frame_)) {
+      H264LOG.error("encodeIFrame: refFrame_.copyFrom() failed - no usable reference for the next encodePFrame()");
+      return 0;
+    }
     haveReference_ = true;
     frameNum_ = 1;  // next call's frame_num - this IDR itself used 0
 
@@ -646,24 +729,33 @@ class Encoder {
   size_t encodePFrame(const uint8_t* srcY, int srcStrideY, const uint8_t* srcU,
                        const uint8_t* srcV, int srcStrideC, int qp,
                        uint8_t* dst, size_t dstCapacity) {
-    if (!haveReference_) return 0;
+    if (!haveReference_) {
+      H264LOG.error("encodePFrame: no reference picture yet (call encodeFrame() to produce an I-frame first)");
+      return 0;
+    }
     if (!resolveQp(&qp)) return 0;
     int width = width_, height = height_;
     // frame_ is already allocated whenever haveReference_ is true (the
     // prior encodeIFrame() call already succeeded at this exact
     // setSize()), so this can't actually fail here - checked anyway for
     // consistency with setSize()'s new bool contract.
-    if (!frame_.setSize(width, height)) return 0;
+    if (!frame_.setSize(width, height)) {
+      H264LOG.error("encodePFrame: frame_.setSize(%d,%d) failed", width, height);
+      return 0;
+    }
     int mbWidth = width / 16, mbHeight = height / 16;
     // mbInfo_ is likewise already allocated whenever haveReference_ is
     // true (the prior encodeIFrame() call's own reset() already
     // succeeded) - checked anyway for the same consistency reason.
-    if (!mbInfo_.reset(mbWidth, mbHeight)) return 0;
+    if (!mbInfo_.reset(mbWidth, mbHeight)) {
+      H264LOG.error("encodePFrame: mbInfo_.reset(%d,%d) failed", mbWidth, mbHeight);
+      return 0;
+    }
 
     BitWriter sliceW(sliceScratch_, sizeof(sliceScratch_));
     writeSliceHeaderP(sliceW, frameNum_, qp, ppsBaseQp_);
 
-    MbEncodeContext<Allocator> ctx;
+    MbEncodeContext ctx;
     ctx.frame = &frame_;
     ctx.mbInfo = &mbInfo_;
     ctx.chromaQpIndexOffset = 0;
@@ -789,7 +881,11 @@ class Encoder {
                                                 bestMv[0], bestMv[1],
                                                 qpRunning, qp);
       }
-      if (sliceW.error()) return 0;
+      if (sliceW.error()) {
+        H264LOG.error("encodePFrame: slice scratch buffer overflowed at mb(%d,%d)",
+                       ctx.mbX, ctx.mbY);
+        return 0;
+      }
     }
     /*
      * Trailing skip run: matches decode's slice_data() loop, which exits
@@ -801,12 +897,18 @@ class Encoder {
     if (pendingSkipRun > 0) sliceW.ue((uint32_t)pendingSkipRun);
 
     sliceW.rbspTrailingBits();
-    if (sliceW.error()) return 0;
+    if (sliceW.error()) {
+      H264LOG.error("encodePFrame: slice scratch buffer overflowed writing trailing bits");
+      return 0;
+    }
 
     size_t o = writeNalUnit(dst, dstCapacity, /*nalRefIdc=*/3,
                              kNalSliceNonIdr, sliceScratch_,
                              sliceW.bytesWritten());
-    if (o == 0) return 0;
+    if (o == 0) {
+      H264LOG.error("encodePFrame: dst too small for the P-slice NAL (dstCapacity=%zu)", dstCapacity);
+      return 0;
+    }
 
     Pps pps;
     pps.chromaQpIndexOffset = 0;
@@ -817,7 +919,10 @@ class Encoder {
     // get here) - checked anyway for consistency with copyFrom()'s new
     // bool contract; same "bitstream already written, but don't trust
     // this call's output" rationale as encodeIFrame()'s copyFrom() check.
-    if (!refFrame_.copyFrom(frame_)) return 0;
+    if (!refFrame_.copyFrom(frame_)) {
+      H264LOG.error("encodePFrame: refFrame_.copyFrom() failed - no usable reference for the next call");
+      return 0;
+    }
     frameNum_ = (frameNum_ + 1) & 0xFF;  // 8 bits (log2_max_frame_num_minus4==4)
 
     updateRateControl(o);
@@ -880,7 +985,11 @@ class Encoder {
    */
   size_t encodePFrameRgb888(const uint8_t* rgb, int rgbStride, int qp,
                              uint8_t* dst, size_t dstCapacity) {
-    if (!haveReference_ || !prepareYuvScratch(width_, height_)) return 0;
+    if (!haveReference_) {
+      H264LOG.error("encodePFrameRgb888: no reference picture yet (call encodeFrame() to produce an I-frame first)");
+      return 0;
+    }
+    if (!prepareYuvScratch(width_, height_)) return 0;
     convertRgb888ToYuv420(rgb, rgbStride, width_, height_, yuvY_.data(),
                            width_, yuvU_.data(), yuvV_.data(), width_ / 2);
     return encodePFrame(yuvY_.data(), width_, yuvU_.data(), yuvV_.data(),
@@ -890,7 +999,11 @@ class Encoder {
   /// Same as encodePFrame(), for RGB666 source data.
   size_t encodePFrameRgb666(const uint8_t* rgb666, int rgbStride, int qp,
                              uint8_t* dst, size_t dstCapacity) {
-    if (!haveReference_ || !prepareYuvScratch(width_, height_)) return 0;
+    if (!haveReference_) {
+      H264LOG.error("encodePFrameRgb666: no reference picture yet (call encodeFrame() to produce an I-frame first)");
+      return 0;
+    }
+    if (!prepareYuvScratch(width_, height_)) return 0;
     convertRgb666ToYuv420(rgb666, rgbStride, width_, height_, yuvY_.data(),
                            width_, yuvU_.data(), yuvV_.data(), width_ / 2);
     return encodePFrame(yuvY_.data(), width_, yuvU_.data(), yuvV_.data(),
@@ -900,7 +1013,11 @@ class Encoder {
   /// Same as encodePFrame(), for RGB565 source data.
   size_t encodePFrameRgb565(const uint16_t* rgb565, int rgbStride, int qp,
                              uint8_t* dst, size_t dstCapacity) {
-    if (!haveReference_ || !prepareYuvScratch(width_, height_)) return 0;
+    if (!haveReference_) {
+      H264LOG.error("encodePFrameRgb565: no reference picture yet (call encodeFrame() to produce an I-frame first)");
+      return 0;
+    }
+    if (!prepareYuvScratch(width_, height_)) return 0;
     convertRgb565ToYuv420(rgb565, rgbStride, width_, height_, yuvY_.data(),
                            width_, yuvU_.data(), yuvV_.data(), width_ / 2);
     return encodePFrame(yuvY_.data(), width_, yuvU_.data(), yuvV_.data(),
@@ -910,7 +1027,11 @@ class Encoder {
   /// Same as encodePFrame(), for YUYV-order packed YUV 4:2:2 source data.
   size_t encodePFrameYuv422(const uint8_t* yuyv, int yuyvStride, int qp,
                              uint8_t* dst, size_t dstCapacity) {
-    if (!haveReference_ || !prepareYuvScratch(width_, height_)) return 0;
+    if (!haveReference_) {
+      H264LOG.error("encodePFrameYuv422: no reference picture yet (call encodeFrame() to produce an I-frame first)");
+      return 0;
+    }
+    if (!prepareYuvScratch(width_, height_)) return 0;
     convertYuyv422ToYuv420(yuyv, yuyvStride, width_, height_, yuvY_.data(),
                             width_, yuvU_.data(), yuvV_.data(), width_ / 2);
     return encodePFrame(yuvY_.data(), width_, yuvU_.data(), yuvV_.data(),
@@ -1027,6 +1148,7 @@ class Encoder {
            framesSinceKeyframe_ >= keyframeInterval_ - 1;
   }
 
+ protected:
   /**
    * Bounds-checks width/height (the same maxWidth_/maxHeight_ budget
    * encodeIFrame() itself checks - see setMaxDimension()) and lazily
@@ -1037,19 +1159,30 @@ class Encoder {
    * callers who only ever use the plain YUV-planes encodeFrame()
    * shouldn't unconditionally pay ~38KB of static RAM for conversion
    * buffers they never touch. Same one-time-allocate-then-reuse idiom as
-   * Frame::ensureAllocated() (h264_frame.h): a `Buffer<uint8_t, Allocator>`
+   * Frame::ensureAllocated() (h264_frame.h): a `Buffer<uint8_t>`
    * allocated once, not a per-call allocation in the hot path, and using
-   * the same Allocator template parameter so it can be placed in PSRAM
-   * alongside frame_ on boards that have it.
+   * the same MemoryResource so it can be placed in PSRAM alongside
+   * frame_ on boards that have it. Protected (not private): a subclass
+   * that needs to hand hardware a planar YUV420 source too (see
+   * encoder/h264_hw_encoder_p4.h::HwEncoderP4) reuses this same scratch
+   * rather than keeping a second copy.
    */
   bool prepareYuvScratch(int width, int height) {
     if (width <= 0 || height <= 0 || (width % 16) != 0 ||
         (height % 16) != 0) {
+      H264LOG.error("prepareYuvScratch: invalid size %dx%d (must be >0 and a multiple of 16)",
+                     width, height);
       return false;
     }
-    if (width > maxWidth_ || height > maxHeight_) return false;
+    if (width > maxWidth_ || height > maxHeight_) {
+      H264LOG.error("prepareYuvScratch: %dx%d exceeds the allocation ceiling %dx%d - see setMaxDimension()",
+                     width, height, maxWidth_, maxHeight_);
+      return false;
+    }
     return ensureYuvScratchAllocated();
   }
+
+ private:
 
   /**
    * The allocation half of prepareYuvScratch() above, split out so
@@ -1085,9 +1218,13 @@ class Encoder {
    */
   bool resolveQp(int* qp) {
     if (*qp == -1) {
-      if (targetFrameBytes_ <= 0) return false;
+      if (targetFrameBytes_ <= 0) {
+        H264LOG.error("resolveQp: qp=-1 (rate control) requested but setTargetBitrate() was never called");
+        return false;
+      }
       *qp = adaptiveQp_;
     } else if (*qp < 0 || *qp > 51) {
+      H264LOG.error("resolveQp: invalid qp=%d (must be 0-51, or -1 for rate control)", *qp);
       return false;
     }
     lastQp_ = *qp;
@@ -1133,13 +1270,21 @@ class Encoder {
     if (adaptiveQp_ > 51) adaptiveQp_ = 51;
   }
 
-  Frame<Allocator> frame_;
-  MbInfoTable<Allocator> mbInfo_;
+  Frame frame_;
+  MbInfoTable mbInfo_;
   uint8_t sliceScratch_[H264_MAX_NAL_SIZE];
-  Buffer<uint8_t, Allocator> yuvY_;
-  Buffer<uint8_t, Allocator> yuvU_;
-  Buffer<uint8_t, Allocator> yuvV_;
 
+ protected:
+  // Declared here (not grouped with the rest of this class's protected
+  // section further below) so their position relative to frame_/mbInfo_/
+  // refFrame_ - all memRes-constructed via this class's own constructor
+  // initializer list, in this exact order - doesn't change; moving them
+  // elsewhere would silently reorder construction (-Wreorder).
+  Buffer<uint8_t> yuvY_;
+  Buffer<uint8_t> yuvU_;
+  Buffer<uint8_t> yuvV_;
+
+ private:
   /*
    * P-frame state: the single reference picture (this milestone's only
    * reference - see h264_macroblock_encode_inter.h), whether one exists
@@ -1149,10 +1294,19 @@ class Encoder {
    * dimensions of its own), and the QP writePpsRbsp() was originally
    * called with (writeSliceHeaderP() needs it to compute slice_qp_delta).
    */
-  Frame<Allocator> refFrame_;
+  Frame refFrame_;
   bool haveReference_ = false;
   int frameNum_ = 0;
+
+ protected:
+  /// Picture width/height established by setSize() - see
+  /// needsKeyframe() (resolution change forces an I-frame) and
+  /// encoder/h264_hw_encoder_p4.h::HwEncoderP4, which reads these
+  /// directly to (re)open the hardware encoder at matching dimensions
+  /// instead of a separate cached copy.
   int width_ = 0, height_ = 0;
+
+ private:
   int ppsBaseQp_ = 0;
 
   /*
@@ -1167,15 +1321,18 @@ class Encoder {
   int adaptiveQp_ = 26;
   int lastQp_ = 26;
 
-  /*
-   * Automatic keyframe state for encodeFrame() (see needsKeyframe()/
-   * setKeyframeInterval()): keyframeInterval_ <= 0 means "never insert a
-   * periodic keyframe" (the default - encodeFrame() still always re-keys
-   * on a fresh sequence or a resolution change, those aren't optional).
-   */
+ protected:
+  /// keyframeInterval_ <= 0 means "never insert a periodic keyframe"
+  /// (the default - encodeFrame() still always re-keys on a fresh
+  /// sequence or a resolution change, those aren't optional) - see
+  /// needsKeyframe()/setKeyframeInterval(). Also read directly by
+  /// encoder/h264_hw_encoder_p4.h::HwEncoderP4 as its own GOP size.
   int keyframeInterval_ = 0;
+
+ private:
   int framesSinceKeyframe_ = 0;
 
+ protected:
   /*
    * Defaults for the public encodeFrame()-family methods (see
    * setStride()/setPackedStride()/setQp()): defaultStrideY_/
@@ -1185,12 +1342,16 @@ class Encoder {
    * encodePFrame()'s own existing qp == -1 meaning, so this needs no
    * separate sentinel). width_/height_ themselves (see setSize()) reuse
    * the fields already declared above rather than duplicating them here.
+   * Protected: encoder/h264_hw_encoder_p4.h::HwEncoderP4 reads these
+   * directly to resolve the same effective stride/QP its inherited
+   * software fallback would use.
    */
   int defaultStrideY_ = -1;
   int defaultStrideC_ = -1;
   int defaultPackedStride_ = -1;
   int defaultQp_ = -1;
 
+ private:
   int maxWidth_ = H264_MAX_WIDTH;    ///< allocation-ceiling width, see setMaxDimension()
   int maxHeight_ = H264_MAX_HEIGHT;  ///< allocation-ceiling height, see setMaxDimension()
   int motionSearchRange_ = 8;  ///< +/-pixel search window, see setMotionSearchRange()

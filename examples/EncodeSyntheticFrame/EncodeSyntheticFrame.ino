@@ -4,12 +4,18 @@
  * bitstream, and benchmarks encode speed (kBenchmarkReps repetitions,
  * avg/min/max fps - see examples/DecodeFromProgmem for the same idea on
  * the decode side). Shows the recommended way to drive the encoder:
- * configure size/keyframe interval via the constructor and bitrate via
- * setTargetBitrate() once, then just encoder.encodeFrame(srcY, srcU,
- * srcV, dst, dstCapacity) per picture - I-frame/P-frame dispatch and
- * periodic keyframes happen automatically. See docs/encoding.md for the
- * full API and encoder scope. Validated via arduino-cli against
- * esp32:esp32:esp32 and rp2040:rp2040:rpipico.
+ * configure size/keyframe interval via the constructor and QP policy
+ * (fixed via setQp(), or rate control via setTargetBitrate()) once, then
+ * just encoder.encodeFrame(srcY, srcU, srcV, dst, dstCapacity) per
+ * picture - I-frame/P-frame dispatch and periodic keyframes happen
+ * automatically. See docs/encoding.md for the full API and encoder
+ * scope. Validated via arduino-cli against esp32:esp32:esp32 and
+ * rp2040:rp2040:rpipico.
+ *
+ * Runs the same benchmark twice, back to back, once per QP policy - see
+ * runBenchmark()'s own comment for why both are exercised here rather
+ * than just one: on ESP32-P4, only one of the two can ever reach the
+ * hardware encoder path at all.
  *
  * For a real application, feed encodeFrame() with real camera frames'
  * Y/U/V planes instead of the synthetic gradient below - the calling
@@ -25,6 +31,7 @@ static const int kWidth = 176;   // QCIF, must be a multiple of 16
 static const int kHeight = 144;
 static const int kNumFrames = 8;       // 1 full GOP: I,P,P,P,I,P,P,P
 static const int kKeyframeInterval = 4; // 1 I-frame every 4 pictures
+static const int kFixedQp = 26;
 static const int kTargetBps = 300000;  // rate control target
 static const double kFps = 25.0;
 
@@ -65,11 +72,6 @@ static uint8_t srcU[(kWidth / 2) * (kHeight / 2)];
 static uint8_t srcV[(kWidth / 2) * (kHeight / 2)];
 static uint8_t bitstream[16384];
 
-static int frameCount = 0;
-static uint64_t totalEncodeUs = 0;
-static uint32_t minFrameUs = 0xFFFFFFFF;
-static uint32_t maxFrameUs = 0;
-
 static void printFreeHeap(const char* label) {
   Serial.print(label);
   Serial.print(": ");
@@ -105,33 +107,39 @@ static void makeTestPattern(int shiftX) {
   }
 }
 
-void setup() {
-  Serial.begin(115200);
-  while (!Serial) delay(10);
-  Serial.println("TinyH264Encoder EncodeSyntheticFrame example");
-  printFreeHeap("Free heap before encode");
+/*
+ * Runs the kNumFrames x kBenchmarkReps encode loop against whatever QP
+ * policy the caller already configured on `encoder` (setQp() or
+ * setTargetBitrate() - this function doesn't care which), and prints a
+ * summary - shared by both of setup()'s two runs below (fixed QP, then
+ * rate control) so the per-frame/summary logging logic exists once.
+ *
+ * Both modes are exercised, back to back, specifically because they
+ * behave differently on ESP32-P4: TinyH264Encoder::ensureHardwareReady()
+ * requires a resolved, non-negative QP before it will even attempt the
+ * hardware encoder (qp_ < 0 - the state setTargetBitrate() leaves it in,
+ * since rate control's adaptive QP lives inside the software Encoder,
+ * not synced back up to TinyH264Encoder's own qp_) - so rate control
+ * mode never attempts hardware at all, cheaply, every call. Fixed QP
+ * mode does attempt it: on this project's current hardware driver (see
+ * README's "ESP32-P4 hardware encoder" section) that attempt itself
+ * still fails, but only the *first* frame pays hw_.encode()'s up-to-
+ * 1-second timeout cost - encoder.h's hwEncodeFailed_ latch then skips
+ * straight to the software encoder for every frame after that. Either
+ * way, every frame here should encode successfully - watch the log line
+ * this prints right before the loop for whether hardware was actually
+ * opened (see TinyH264Encoder::ensureHardwareReady()'s own log lines).
+ */
+static void runBenchmark(const char* modeLabel) {
+  Serial.print("-- ");
+  Serial.print(modeLabel);
+  Serial.println(" --");
 
-  // See the file header comment: sizes buffers for this sketch's actual
-  // QCIF content instead of the project-wide compile-time default.
-  encoder.setMaxDimension(kWidth, kHeight);
-  encoder.setMotionSearchRange(kMotionSearchRange);
-  encoder.setMotionSearchAlgorithm(kMotionSearchAlgorithm);
+  int frameCount = 0;
+  uint64_t totalEncodeUs = 0;
+  uint32_t minFrameUs = 0xFFFFFFFF;
+  uint32_t maxFrameUs = 0;
 
-  /*
-   * Width/height/keyframe interval were already configured by the
-   * constructor above; target bitrate (qp defaults to -1 - rate control -
-   * unless setQp() is also called) is the one setting left to configure
-   * once, up front, instead of repeating on every encodeFrame() call
-   * below.
-   */
-  encoder.setTargetBitrate(kTargetBps, kFps);
-
-  /*
-   * Encodes the same kNumFrames-picture GOP kBenchmarkReps times back to
-   * back (see kBenchmarkReps' own comment above) - keyframes and P-frames
-   * keep alternating exactly the same way across repetitions, since
-   * kKeyframeInterval divides kNumFrames evenly.
-   */
   for (int rep = 0; rep < kBenchmarkReps; rep++) {
     for (int i = 0; i < kNumFrames; i++) {
       makeTestPattern(i * 4);  // a little more horizontal shift each frame
@@ -159,7 +167,9 @@ void setup() {
       /*
        * The very first frame overall also pays for one-time picture-
        * buffer allocation (Frame::ensureAllocated(), first triggered by
-       * the first encodeFrame() call), so it isn't representative of
+       * the first encodeFrame() call) and - in fixed-QP mode - the
+       * hardware encoder's own failed-attempt timeout (see this
+       * function's own comment above), so it isn't representative of
        * steady-state per-frame cost - excluded from the running stats,
        * still printed below.
        */
@@ -211,6 +221,31 @@ void setup() {
     Serial.print(1000000.0f / maxFrameUs, 1);
     Serial.println(" fps)");
   }
+  Serial.println();
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial) delay(10);
+  Serial.println("TinyH264Encoder EncodeSyntheticFrame example");
+  printFreeHeap("Free heap before encode");
+
+  // See the file header comment: sizes buffers for this sketch's actual
+  // QCIF content instead of the project-wide compile-time default.
+  encoder.setMaxDimension(kWidth, kHeight);
+  encoder.setMotionSearchRange(kMotionSearchRange);
+  encoder.setMotionSearchAlgorithm(kMotionSearchAlgorithm);
+
+  // Fixed QP first - see runBenchmark()'s own comment for why this is
+  // the mode that can actually reach ESP32-P4's hardware encoder path.
+  encoder.setQp(kFixedQp);
+  runBenchmark("Fixed QP (setQp() - hardware encoder path eligible on ESP32-P4)");
+
+  // Then rate control - same encoder instance, same content, just a
+  // different QP policy (setTargetBitrate() instead of setQp()).
+  encoder.setQp(-1);  // re-enable rate control (setQp() above pinned it)
+  encoder.setTargetBitrate(kTargetBps, kFps);
+  runBenchmark("Rate control (setTargetBitrate() - always software-only on ESP32-P4)");
 
   printFreeHeap("Free heap after encode");
 }
