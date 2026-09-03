@@ -1,6 +1,11 @@
 #pragma once
+#include <cstring>
+
 #include "StdAllocator.h"
+#include "common/h264_buffer.h"
+#include "encoder/h264_color_convert.h"
 #include "encoder/h264_encoder.h"
+#include "encoder/h264_hw_encoder_p4.h"
 #ifdef ESP32
 #include "PSRAMAllocatorESP32.h"
 #endif
@@ -87,7 +92,76 @@ class TinyH264Encoder {
    * before this constructor existed.
    */
   TinyH264Encoder(int width = 0, int height = 0, int keyframeInterval = 0)
-      : encoder_(width, height, keyframeInterval) {}
+      : encoder_(width, height, keyframeInterval) {
+    width_ = width;
+    height_ = height;
+    keyframeInterval_ = keyframeInterval;
+  }
+
+  /**
+   * True if this build can actually use ESP32-P4's dedicated hardware
+   * H.264 encoder - i.e. this is being compiled for the `esp32p4`
+   * target (chip revision < 3.0 - see
+   * `encoder/h264_hw_encoder_p4.h`'s file comment for why that specific
+   * silicon revision). Unlike an earlier version of this feature, this
+   * is available from a plain Arduino IDE/`arduino-cli` sketch build
+   * too - the hardware driver talks directly to the H.264 core/DMA
+   * registers and only genuinely generic ESP-IDF infrastructure
+   * (`esp_intr_alloc`/`esp_cache_msync`/FreeRTOS), none of which needs
+   * Espressif's own `esp_h264`/`esp_video` components. A compile-time
+   * answer (no device is touched to check this), so it's safe to call
+   * before setUseHardware().
+   */
+  static constexpr bool hardwareAvailable() {
+#ifdef TINYH264_HW_ENCODER_P4_AVAILABLE
+    return true;
+#else
+    return false;
+#endif
+  }
+
+  /**
+   * Switches `encodeFrame()` (and its color-format overloads) between
+   * this library's own software Baseline/CAVLC pipeline (the default)
+   * and ESP32-P4's dedicated hardware H.264 encoder
+   * (`encoder/h264_hw_encoder_p4.h::HwEncoderP4`). Returns false and
+   * leaves the previous mode in effect if `enable` is true but
+   * `hardwareAvailable()` is false.
+   *
+   * The hardware path is a genuinely different implementation, with a
+   * deliberately narrower feature set than the software one - see
+   * `HwEncoderP4`'s own file header for the full scope/validation-status
+   * disclaimer (this is the one part of the library that hasn't been
+   * validated the way everything else has - no pixel-diff oracle exists
+   * for real hardware output). While hardware mode is active:
+   * - `setQp()` sets the one fixed QP used for the whole stream - the
+   *   hardware driver doesn't support `setTargetBitrate()`-style rate
+   *   control in this version (unlike the software path, there's no
+   *   `-1`/auto sentinel; hardware mode requires an explicit `setQp()`
+   *   call with a real 0-51 value, and fails cleanly - `encodeFrame()`
+   *   returning 0 - if none was ever given).
+   * - `setKeyframeInterval()` becomes the hardware's own GOP size.
+   * - `setMotionSearchRange()`/`setMotionSearchAlgorithm()`/
+   *   `setAllOptimizationsActive()` and `setTargetBitrate()` are
+   *   software-encoder-specific and silently ignored in hardware mode.
+   * - Unlike the software path, there's no per-call I/P decision to
+   *   reason about - the hardware decides GOP placement entirely on its
+   *   own once opened.
+   *
+   * The hardware device is opened lazily (on the next `encodeFrame()`-
+   * family call, once `setSize()`/`setQp()` have established real
+   * values) rather than by this call itself.
+   */
+  bool setUseHardware(bool enable) {
+    if (enable && !hardwareAvailable()) return false;
+    if (useHardware_ != enable) hwConfigDirty_ = true;
+    useHardware_ = enable;
+    return true;
+  }
+
+  /// Whether `encodeFrame()` (and its color-format overloads) currently
+  /// route through ESP32-P4's hardware encoder - see setUseHardware().
+  bool useHardware() const { return useHardware_; }
 
   /**
    * Encodes one picture, automatically deciding I-frame vs. P-frame -
@@ -113,6 +187,12 @@ class TinyH264Encoder {
    */
   size_t encodeFrame(const uint8_t* srcY, const uint8_t* srcU,
                       const uint8_t* srcV, uint8_t* dst, size_t dstCapacity) {
+    if (useHardware_) {
+      int strideY = strideY_ > 0 ? strideY_ : width_;
+      int strideC = strideC_ > 0 ? strideC_ : width_ / 2;
+      return encodeHwPlanar(srcY, strideY, srcU, srcV, strideC, dst,
+                             dstCapacity);
+    }
     return encoder_.encodeFrame(srcY, srcU, srcV, dst, dstCapacity);
   }
 
@@ -127,6 +207,13 @@ class TinyH264Encoder {
    */
   size_t encodeFrameRgb888(const uint8_t* rgb, uint8_t* dst,
                             size_t dstCapacity) {
+    if (useHardware_) {
+      int stride = packedStride_ > 0 ? packedStride_ : width_ * 3;
+      if (!prepareHwScratch()) return 0;
+      convertRgb888ToYuv420(rgb, stride, width_, height_, hwScratchY(),
+                             width_, hwScratchU(), hwScratchV(), width_ / 2);
+      return encodeHwScratch(dst, dstCapacity);
+    }
     return encoder_.encodeFrameRgb888(rgb, dst, dstCapacity);
   }
 
@@ -138,6 +225,13 @@ class TinyH264Encoder {
    */
   size_t encodeFrameRgb666(const uint8_t* rgb666, uint8_t* dst,
                             size_t dstCapacity) {
+    if (useHardware_) {
+      int stride = packedStride_ > 0 ? packedStride_ : width_ * 3;
+      if (!prepareHwScratch()) return 0;
+      convertRgb666ToYuv420(rgb666, stride, width_, height_, hwScratchY(),
+                             width_, hwScratchU(), hwScratchV(), width_ / 2);
+      return encodeHwScratch(dst, dstCapacity);
+    }
     return encoder_.encodeFrameRgb666(rgb666, dst, dstCapacity);
   }
 
@@ -149,6 +243,13 @@ class TinyH264Encoder {
    */
   size_t encodeFrameRgb565(const uint16_t* rgb565, uint8_t* dst,
                             size_t dstCapacity) {
+    if (useHardware_) {
+      int stride = packedStride_ > 0 ? packedStride_ : width_;
+      if (!prepareHwScratch()) return 0;
+      convertRgb565ToYuv420(rgb565, stride, width_, height_, hwScratchY(),
+                             width_, hwScratchU(), hwScratchV(), width_ / 2);
+      return encodeHwScratch(dst, dstCapacity);
+    }
     return encoder_.encodeFrameRgb565(rgb565, dst, dstCapacity);
   }
 
@@ -160,6 +261,13 @@ class TinyH264Encoder {
    */
   size_t encodeFrameYuv422(const uint8_t* yuyv, uint8_t* dst,
                             size_t dstCapacity) {
+    if (useHardware_) {
+      int stride = packedStride_ > 0 ? packedStride_ : width_ * 2;
+      if (!prepareHwScratch()) return 0;
+      convertYuyv422ToYuv420(yuyv, stride, width_, height_, hwScratchY(),
+                              width_, hwScratchU(), hwScratchV(), width_ / 2);
+      return encodeHwScratch(dst, dstCapacity);
+    }
     return encoder_.encodeFrameYuv422(yuyv, dst, dstCapacity);
   }
 
@@ -176,6 +284,9 @@ class TinyH264Encoder {
   void setTargetBitrate(int bitsPerSecond, double fps) {
     encoder_.setTargetBitrate(bitsPerSecond, fps);
   }
+  // Note: setTargetBitrate() only affects the software encoder path -
+  // see setUseHardware()'s own comment for why the hardware path
+  // requires a fixed setQp() instead.
 
   /**
    * The QP actually used by the most recent encodeFrame()-family call -
@@ -193,6 +304,8 @@ class TinyH264Encoder {
    */
   void setKeyframeInterval(int frames) {
     encoder_.setKeyframeInterval(frames);
+    if (keyframeInterval_ != frames) hwConfigDirty_ = true;
+    keyframeInterval_ = frames;
   }
 
   /**
@@ -202,7 +315,12 @@ class TinyH264Encoder {
    * before or after begin(); required before the first encodeFrame()
    * call.
    */
-  void setSize(int width, int height) { encoder_.setSize(width, height); }
+  void setSize(int width, int height) {
+    encoder_.setSize(width, height);
+    if (width != width_ || height != height_) hwConfigDirty_ = true;
+    width_ = width;
+    height_ = height;
+  }
 
   /**
    * Overrides the Y/C plane row strides encodeFrame() uses - only needed
@@ -211,6 +329,8 @@ class TinyH264Encoder {
    */
   void setStride(int strideY, int strideC) {
     encoder_.setStride(strideY, strideC);
+    strideY_ = strideY;
+    strideC_ = strideC;
   }
 
   /**
@@ -219,14 +339,24 @@ class TinyH264Encoder {
    * see Encoder::setPackedStride()'s own comment for the units (format-
    * dependent) and tightly-packed default this replaces.
    */
-  void setPackedStride(int stride) { encoder_.setPackedStride(stride); }
+  void setPackedStride(int stride) {
+    encoder_.setPackedStride(stride);
+    packedStride_ = stride;
+  }
 
   /**
    * Overrides the `qp` encodeFrame() (and its color-format overloads)
    * use - see Encoder::setQp()'s own comment (default -1: rate control
-   * via setTargetBitrate()).
+   * via setTargetBitrate()). In hardware mode (see setUseHardware()),
+   * `qp` is the one fixed QP used for the whole stream - hardware mode
+   * has no rate-control sentinel, so a negative `qp` there makes
+   * encodeFrame() fail (return 0) until a real 0-51 value is set.
    */
-  void setQp(int qp) { encoder_.setQp(qp); }
+  void setQp(int qp) {
+    encoder_.setQp(qp);
+    if (qp_ != qp) hwConfigDirty_ = true;
+    qp_ = qp;
+  }
 
   /**
    * Overrides the +/-pixel window the motion search checks per
@@ -322,7 +452,14 @@ class TinyH264Encoder {
    * to call begin()/encodeFrame() again afterward (after a fresh
    * setSize() call, since end() does reset the established width/height).
    */
-  void end() { encoder_.end(); }
+  void end() {
+    encoder_.end();
+#ifdef TINYH264_HW_ENCODER_P4_AVAILABLE
+    hw_.close();
+    hwScratch_.release();
+    hwConfigDirty_ = true;
+#endif
+  }
 
   /**
    * The most recently encoded picture, reconstructed exactly as decoding
@@ -341,6 +478,99 @@ class TinyH264Encoder {
 
  private:
   Encoder<Allocator> encoder_;
+
+  // Cached copies of setSize()/setStride()/setPackedStride()/setQp()/
+  // setKeyframeInterval() - encoder_ (Encoder<Allocator>) has no getters
+  // for its own equivalents, and the hardware path needs to read them
+  // back to (re)open HwEncoderP4 with matching configuration.
+  int width_ = 0;
+  int height_ = 0;
+  int strideY_ = 0;
+  int strideC_ = 0;
+  int packedStride_ = 0;
+  int qp_ = -1;
+  int keyframeInterval_ = 0;
+  bool useHardware_ = false;
+  // True whenever open()-affecting configuration (size, qp, keyframe
+  // interval) changed since the hardware encoder was last opened -
+  // checked by ensureHardwareReady() to decide whether to reopen.
+  // Declared unconditionally since setSize()/setQp()/
+  // setKeyframeInterval() all write to it unconditionally too -
+  // harmless dead state on a build where the hardware path itself isn't
+  // available.
+  bool hwConfigDirty_ = true;
+
+#ifdef TINYH264_HW_ENCODER_P4_AVAILABLE
+  HwEncoderP4 hw_;
+  Buffer<uint8_t, Allocator> hwScratch_;
+
+  bool ensureHardwareReady() {
+    if (width_ <= 0 || height_ <= 0 || qp_ < 0) return false;
+    if (hw_.isOpen() && hw_.width() == width_ && hw_.height() == height_ &&
+        !hwConfigDirty_) {
+      return true;
+    }
+    if (!hw_.open(width_, height_, qp_, keyframeInterval_)) return false;
+    hwConfigDirty_ = false;
+    return true;
+  }
+
+  bool prepareHwScratch() {
+    if (width_ <= 0 || height_ <= 0) return false;
+    size_t ySize = (size_t)width_ * height_;
+    size_t cSize = (size_t)(width_ / 2) * (height_ / 2);
+    size_t needed = ySize + 2 * cSize;
+    if (!hwScratch_.empty() && hwScratch_.size() != needed) {
+      hwScratch_.release();
+    }
+    return hwScratch_.allocate(needed);
+  }
+
+  uint8_t* hwScratchY() { return hwScratch_.data(); }
+  uint8_t* hwScratchU() {
+    return hwScratch_.data() + (size_t)width_ * height_;
+  }
+  uint8_t* hwScratchV() {
+    return hwScratchU() + (size_t)(width_ / 2) * (height_ / 2);
+  }
+
+  // Encodes hwScratch_ (already filled with tightly-packed YUV420 by a
+  // color-format overload's convert*ToYuv420() call) via the hardware
+  // encoder - shared tail end of encodeFrameRgb888()/Rgb666()/Rgb565()/
+  // Yuv422()'s hardware path.
+  size_t encodeHwScratch(uint8_t* dst, size_t dstCapacity) {
+    if (!ensureHardwareReady()) return 0;
+    return hw_.encode(hwScratchY(), width_, hwScratchU(), hwScratchV(),
+                       width_ / 2, dst, dstCapacity);
+  }
+
+  // Encodes separate Y/U/V planes (encodeFrame()'s own source shape)
+  // directly via the hardware encoder - no scratch copy needed, since
+  // HwEncoderP4::encode() itself takes strided Y/U/V planes (it does
+  // its own internal conversion to the packed pixel format the
+  // hardware requires).
+  size_t encodeHwPlanar(const uint8_t* srcY, int strideY, const uint8_t* srcU,
+                        const uint8_t* srcV, int strideC, uint8_t* dst,
+                        size_t dstCapacity) {
+    if (!ensureHardwareReady()) return 0;
+    return hw_.encode(srcY, strideY, srcU, srcV, strideC, dst, dstCapacity);
+  }
+#else
+  // Unreachable stubs (useHardware_ can never be true without
+  // TINYH264_HW_ENCODER_P4_AVAILABLE - see setUseHardware()) that exist
+  // only so encodeFrame()/the color-format overloads' `if (useHardware_)`
+  // branches still compile on a build where the hardware path itself
+  // isn't available.
+  bool prepareHwScratch() { return false; }
+  size_t encodeHwScratch(uint8_t*, size_t) { return 0; }
+  size_t encodeHwPlanar(const uint8_t*, int, const uint8_t*, const uint8_t*,
+                        int, uint8_t*, size_t) {
+    return 0;
+  }
+  uint8_t* hwScratchY() { return nullptr; }
+  uint8_t* hwScratchU() { return nullptr; }
+  uint8_t* hwScratchV() { return nullptr; }
+#endif  // TINYH264_HW_ENCODER_P4_AVAILABLE
 };
 
 }  // namespace tinyh264

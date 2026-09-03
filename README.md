@@ -97,6 +97,114 @@ work (a duplicate motion-compensation/transform pass eliminated - see
 [Optimizations](docs/optimizations.md#encoding)): avg 88616 -> 21461 us (= 46.6 fps)
 (**4.13x faster**).
 
+**ESP32-P4 hardware encoder (`TinyH264Encoder::setUseHardware()`)**: no
+timing numbers yet - real on-device testing (`arduino-cli` build + flash,
+`USBMode=hwcdc,CDCOnBoot=cdc,PSRAM=enabled`, chip revision v1.3) shows
+`setUseHardware(true)` succeeds and `encodeFrame()` reaches the hardware
+and starts a real DMA transfer, but every frame currently times out
+waiting for the hardware's own `FRAME_DONE` interrupt (a clean,
+non-hanging failure - `encodeFrame()` returns 0 after ~1 second rather
+than freezing the board) rather than producing output. This is a
+register/DMA-sequencing bug in the from-scratch hardware driver
+(`src/encoder/h264_hw_encoder_p4.h`), not a hang or crash risk - a real,
+still-open item after a genuinely extensive investigation (summarized
+below), not yet something to benchmark.
+
+**If you need working ESP32-P4 hardware H.264 encoding today**, use
+[codec-h264-ESP32P4](https://github.com/pschatzmann/codec-h264-ESP32P4)
+instead - a sibling project, also by this author, that wraps
+Espressif's own real `esp_h264` driver source (vendored and compiled
+from source, Apache-2.0, no precompiled blobs) behind a clean Arduino
+API. It's confirmed working on real hardware: VGA (640x480) at ~70 fps,
+QCIF in ~1ms/frame, correct periodic IDR frames, valid Annex-B output.
+This from-scratch driver's own investigation (below) exists to
+understand *why* a register-level reimplementation doesn't work, using
+that project's real driver as ground truth - not because
+`codec-h264-ESP32P4` needs it.
+
+### Investigation history
+
+Cross-checked against Espressif's official, chip-revision-matched
+Technical Reference Manual, the `esp_h264` component's published docs,
+and - most valuably - `codec-h264-ESP32P4`'s vendored copy of
+Espressif's actual driver *source*, used as a live, on-the-same-board
+comparison target via a series of hybrid bisection tests (see that
+project's `examples/RegisterDump`, `examples/HybridBisection`,
+`examples/HybridBisection2`, `examples/HybridBisection3`, and this
+project's own `examples/HwEncoderP4RegisterDump`). Four real,
+independently-confirmed bugs were found and fixed along the way:
+
+- TX channel 2 (the deblocking-intermediate feedback channel into
+  ENC_CORE) was being started on the `DB_TMP_READY` interrupt instead
+  of up front - the TRM's documented procedure says to gate it on the
+  interrupt, but Espressif's own real, working driver starts it up
+  front unconditionally, contradicting its own manual. Real source beat
+  documentation prose here; reverted to match the real driver.
+- Symmetrically, an ENC_CORE reset pulse (`h264Reset()`) between arming
+  the DMA channels and `frame_start` was removed based on the TRM
+  having no such step, then restored after finding the real driver
+  calls it at exactly that point too - another case of the TRM's prose
+  not matching the shipped, working implementation.
+- Every `H264DmaDesc` (whose address is written directly into an
+  `OUTLINK_ADDR_CHx`/`INLINK_ADDR_CHx` register) was allocated without
+  the TRM's documented "8-byte alignment" requirement (37.5.2.3) - only
+  the picture/reference/deblock *buffers* had it, not the descriptor
+  structs.
+- `dmaClearAllInterrupts()` was missing entirely: the real driver's
+  `h264_start_gop_mode_enc()` clears every DMA channel's own
+  `int_clr` latch (a register separate from the H.264 core's top-level
+  interrupt register, which this port already cleared) as its first
+  step, every frame. This port never cleared it, on any channel, for
+  its whole lifetime - found via a direct, full register-bank diff
+  against `codec-h264-ESP32P4` at the "armed, not yet started" point,
+  which (after this and the ROI-below fix) came back a complete match
+  save for content-dependent slice-header bytes.
+- ROI was never enabled on `ctrl[1]` (video stream B) - unused by this
+  single-stream driver, but Espressif's own `h264_hal_init()` loops
+  over *both* channels regardless, forcing `roi_en=1` even there
+  (despite a misleading `/* Disable ROI */` comment at the call site).
+
+All four are real, kept correctness fixes. None resolved the underlying
+stall. A hybrid bisection methodology (swapping this driver's own setup
+against the real driver's DMA-start functions and vice versa, on the
+same board) went further and **positively proved this port's low-level
+primitives are not buggy**: `dmaStartOutChannel()`, `dmaResetChannelGeneric()`,
+`h264Reset()`, `h264SetFrameStart()`, and this port's whole setup phase,
+called directly and standalone (bypassing this class's own methods
+entirely), produced one genuinely complete real encode - `FRAME_DONE`
+fired, a real 300-byte coded frame, in 354 microseconds. That result
+was not reproducible on a rebuild, and is now believed to have been a
+one-off (most likely leftover hardware/register state from an earlier
+JTAG debugging session on the same board, not a real, repeatable
+success) - but it stands as proof the primitives *can* work correctly.
+This project's own `HwEncoderP4::encodeDiagnostic()`, calling the exact
+same primitives through its own class methods, fails 100% deterministically
+regardless: JTAG live inspection (OpenOCD/GDB over the board's built-in
+USB-JTAG) found no silent CPU exception or crash, and a systematic sweep
+of settling delays (10us up to 2ms before `frame_start`, and 200us
+between every individual DMA channel start) changed nothing at all -
+ruling out both a hardware fault and a timing/settling-time race as
+explanations.
+
+Post-mortem reads of the real, TRM-documented rate-control status
+registers (`frame_enc_bits`, `frame_mad_sum`, `frame_qp_sum`,
+`frame_code_length`) read exactly 0 in every failing run, meaning
+ENC_CORE never begins macroblock processing at all when driven through
+this class's own code path - even though the DMA-side state register
+for TX channel 0 shows it correctly fetches the right descriptor and
+returns to idle rather than hanging mid-transfer, and even though the
+identical primitives succeeded once when called directly. `debug_info0`/
+`debug_info1` (the hardware's own internal FSM debug registers) are
+intentionally undocumented by Espressif - absent from the TRM's own
+register list entirely - so this project has exhausted what official
+documentation, live register diffing, hybrid bisection, JTAG inspection,
+and delay experiments can resolve without either a different class of
+hardware tool (a logic analyzer on the AXI/memory bus) or direct vendor
+engagement. Given a fully working alternative already exists
+(`codec-h264-ESP32P4`), this from-scratch driver remains documented here
+as an honest, thoroughly-investigated open item rather than something
+under active pursuit.
+
 
 ## Containers
 
@@ -129,6 +237,11 @@ ffplay/mpv but not in a browser `<video>` tag.
 - [Encoding](docs/encoding.md) - `TinyH264Encoder` usage, `encodeFrame()`
   and its RGB/YUV422 overloads, automatic I-frame/P-frame dispatch,
   periodic keyframes, and rate control.
+- `examples/EncodeDecodeRoundTrip` - encodes a synthetic sequence, feeds
+  it straight back into `TinyH264Decoder`, and checks each decoded
+  picture against its source frame by PSNR - a real on-device
+  encoder+decoder sanity check, verified passing (8/8 frames, Y PSNR
+  49-53dB) on real ESP32-P4 hardware.
 - [Preparing input with ffmpeg](docs/preparing-input-with-ffmpeg.md) -
   the exact `ffmpeg`/libx264 command line (and why each flag is needed)
   to produce a stream this decoder can read.
