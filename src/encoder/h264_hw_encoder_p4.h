@@ -132,6 +132,7 @@
 
 #include "esp_cache.h"
 #include "esp_heap_caps.h"
+#include "esp_memory_utils.h"
 #include "esp_intr_alloc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -766,6 +767,13 @@ inline void cacheWriteback(void* addr, size_t len) {
   esp_cache_msync(addr, len,
                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 }
+/// Write back, then drop the lines (C2M + INVALIDATE + UNALIGNED is legal).
+inline void cacheWritebackInvalidate(void* addr, size_t len) {
+  if (!addr || len == 0) return;
+  esp_cache_msync(addr, len,
+                   ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE |
+                       ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+}
 // M2C (invalidate) does NOT accept ESP_CACHE_MSYNC_FLAG_UNALIGNED - unlike
 // the C2M (writeback) direction above, the underlying ESP-IDF API
 // actively rejects the combination (a real, confirmed-at-runtime
@@ -801,7 +809,10 @@ inline void cacheWriteback(void* addr, size_t len) {
 // tradeoff any driver invalidating a not-necessarily-aligned
 // caller-supplied buffer has to make.
 inline void cacheInvalidate(void* addr, size_t len) {
-  constexpr uintptr_t kCacheLineSize = 64;
+  // Line size of the memory the address lives in: L1 64 B for internal RAM,
+  // L2 128 B for PSRAM on ESP32-P4. Never use the PSRAM line on an internal
+  // pointer (would discard neighbouring heap data).
+  const uintptr_t kCacheLineSize = esp_ptr_external_ram(addr) ? 128 : 64;
   uintptr_t start = reinterpret_cast<uintptr_t>(addr);
   uintptr_t end = start + len;
   uintptr_t alignedStart = start & ~(kCacheLineSize - 1);
@@ -1526,7 +1537,12 @@ class HwEncoderP4 : public SoftwareEncoder {
                                           sliceHeaderBits);
 
     size_t outFrameLen = (size_t)(src - dst);
-    hw_p4_detail::cacheWriteback(dst, (bitLen + 7) >> 3);
+    // Header is CPU-written; DMA then fills from `src`, which usually shares
+    // a cache line with the header tail. Write back AND drop that line so a
+    // later CPU store (start-code rewrite) cannot stomp DMA data with stale
+    // cached bytes (Espressif esp-h264-component 1.4.1 fix).
+    hw_p4_detail::cacheWritebackInvalidate(
+        dst, ((size_t)((bitLen + 7) >> 3) + 7) & ~(size_t)7);
 
     if (dstCapacity <= outFrameLen) return 0;
     // eof=0 - REVERTED from an earlier "eof=1" change. That change was
@@ -1601,8 +1617,13 @@ class HwEncoderP4 : public SoftwareEncoder {
     // report success with a length larger than the buffer supplied.
     if ((size_t)codedLen + outFrameLen > dstCapacity) overflow = true;
 
+    // On overflow the receiver never got a usable frame: force the next
+    // frame back to IDR so downstream decoders resync (matches Espressif).
+    if (overflow) {
+      hwFrameNum_ = 0;
+      return 0;
+    }
     hwFrameNum_++;
-    if (overflow) return 0;
     return (size_t)codedLen + outFrameLen;
   }
   int hwWidth_ = 0, hwHeight_ = 0, mbWidth_ = 0, mbHeight_ = 0;
